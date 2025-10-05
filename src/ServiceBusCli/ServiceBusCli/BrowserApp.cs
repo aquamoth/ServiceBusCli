@@ -69,6 +69,7 @@ public sealed class BrowserApp
         long nextFromSequence = 0; // 0 => start of queue/subscription
         var pageHistory = new Stack<long>();
         var messages = new List<MessageRow>();
+        string? status = null;
 
         // If args include entity, resolve it and jump to messages
         if (selectedNs != null && (!string.IsNullOrWhiteSpace(_queueArg) || (!string.IsNullOrWhiteSpace(_topicArg) && !string.IsNullOrWhiteSpace(_tSubArg))))
@@ -88,7 +89,7 @@ public sealed class BrowserApp
 
         while (true)
         {
-            Render(view, namespaces, selectedNs, entities, selectedEntity, messages);
+            Render(view, namespaces, selectedNs, entities, selectedEntity, messages, status);
             var key = Console.ReadKey(true);
             if (key.Key == ConsoleKey.Q) break;
             if (key.Key == ConsoleKey.PageDown)
@@ -101,9 +102,17 @@ public sealed class BrowserApp
                     {
                         pageHistory.Push(nextFromSequence);
                         nextFromSequence = messages.Last().SequenceNumber + 1;
-                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
-                        messages.Clear();
-                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                        try
+                        {
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                            messages.Clear();
+                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                        }
+                        catch (Exception ex) when (IsUnauthorized(ex))
+                        {
+                            view = View.Entities;
+                            status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
+                        }
                         }
                 }
                 continue;
@@ -115,9 +124,17 @@ public sealed class BrowserApp
                 else if (view == View.Messages && pageHistory.Count > 0)
                 {
                     nextFromSequence = pageHistory.Pop();
-                    (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
-                    messages.Clear();
-                    messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                    try
+                    {
+                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                        messages.Clear();
+                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                    }
+                    catch (Exception ex) when (IsUnauthorized(ex))
+                    {
+                        view = View.Entities;
+                        status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
+                    }
                 }
                 continue;
             }
@@ -131,11 +148,10 @@ public sealed class BrowserApp
                 if (cmd.Kind == CommandKind.Quit) break;
                 if (view != View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
                 {
-                    var index = cmd.Index.Value - 1;
+                    var index = cmd.Index.Value - 1; // global index (1-based display)
                     if (view == View.Namespaces)
                     {
-                        var page = Page(_nsPage, namespaces.Count);
-                        var idx = page.start + index;
+                        var idx = index;
                         if (idx >= 0 && idx < namespaces.Count)
                         {
                             selectedNs = namespaces[idx];
@@ -146,8 +162,7 @@ public sealed class BrowserApp
                     }
                     else if (view == View.Entities)
                     {
-                        var page = Page(_entPage, entities.Count);
-                        var idx = page.start + index;
+                        var idx = index;
                         if (idx >= 0 && idx < entities.Count)
                         {
                             var e = entities[idx];
@@ -157,9 +172,17 @@ public sealed class BrowserApp
                             view = View.Messages;
                             pageHistory.Clear();
                             nextFromSequence = 0;
-                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
-                            messages.Clear();
-                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                            try
+                            {
+                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                                messages.Clear();
+                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                            }
+                            catch (Exception ex) when (IsUnauthorized(ex))
+                            {
+                                view = View.Entities;
+                                status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
+                            }
                         }
                     }
                 }
@@ -182,8 +205,7 @@ public sealed class BrowserApp
                     // Re-run same as above, but reuse logic
                     if (view == View.Namespaces)
                     {
-                        var page = Page(_nsPage, namespaces.Count);
-                        var idx = page.start + (n - 1);
+                        var idx = n - 1;
                         if (idx >= 0 && idx < namespaces.Count)
                         {
                             selectedNs = namespaces[idx];
@@ -194,8 +216,7 @@ public sealed class BrowserApp
                     }
                     else if (view == View.Entities)
                     {
-                        var page = Page(_entPage, entities.Count);
-                        var idx = page.start + (n - 1);
+                        var idx = n - 1;
                         if (idx >= 0 && idx < entities.Count)
                         {
                             var e = entities[idx];
@@ -205,9 +226,17 @@ public sealed class BrowserApp
                             view = View.Messages;
                             pageHistory.Clear();
                             nextFromSequence = 0;
-                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
-                            messages.Clear();
-                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                            try
+                            {
+                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                                messages.Clear();
+                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                            }
+                            catch (Exception ex) when (IsUnauthorized(ex))
+                            {
+                                view = View.Entities;
+                                status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
+                            }
                         }
                     }
                 }
@@ -288,7 +317,18 @@ public sealed class BrowserApp
         }
     }
 
-    private void Render(View view, List<SBNamespace> namespaces, SBNamespace? selectedNs, IReadOnlyList<EntityRow> entities, SBEntityId? selectedEntity, IReadOnlyList<MessageRow> messages)
+    private static bool IsUnauthorized(Exception ex)
+    {
+        if (ex is UnauthorizedAccessException) return true;
+        if (ex is Azure.RequestFailedException rfe && (rfe.Status == 401 || rfe.Status == 403)) return true;
+        if (ex is Azure.Messaging.ServiceBus.ServiceBusException sb && sb.Message.Contains("Unauthorized", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ex.InnerException != null) return IsUnauthorized(ex.InnerException);
+        return false;
+    }
+
+    // Status is rendered by Render() when provided
+
+    private void Render(View view, List<SBNamespace> namespaces, SBNamespace? selectedNs, IReadOnlyList<EntityRow> entities, SBEntityId? selectedEntity, IReadOnlyList<MessageRow> messages, string? status)
     {
         Console.Clear();
         var title = view switch
@@ -322,7 +362,7 @@ public sealed class BrowserApp
             {
                 var idx = start + i;
                 var ns = namespaces[idx];
-                Console.WriteLine($"{i + 1,2}. {ns.Name,-30} {ns.ResourceGroup,-24} {ns.SubscriptionId}");
+                Console.WriteLine($"{idx + 1,4}. {ns.Name,-30} {ns.ResourceGroup,-24} {ns.SubscriptionId}");
             }
         }
         else if (view == View.Entities)
@@ -335,7 +375,7 @@ public sealed class BrowserApp
                 var idx = start + i;
                 var e = entities[idx];
                 var kind = e.Kind == EntityKind.Queue ? "Queue" : "Sub  ";
-                Console.WriteLine($"{i + 1,3}. {kind} {TextTruncation.Truncate(e.Path, 40),-40} {TextTruncation.Truncate(e.Status, 10),-10} {e.Total,8} {e.Active,8} {e.DeadLetter,8}");
+                Console.WriteLine($"{idx + 1,4}. {kind} {TextTruncation.Truncate(e.Path, 40),-40} {TextTruncation.Truncate(e.Status, 10),-10} {e.Total,8} {e.Active,8} {e.DeadLetter,8}");
             }
         }
         else if (view == View.Messages)
@@ -351,7 +391,15 @@ public sealed class BrowserApp
 
         // Footer / prompt line
         Console.SetCursorPosition(0, Console.WindowHeight - 2);
-        Console.WriteLine("Use PageUp/PageDown. Type number+Enter to select, q to quit.");
+        if (!string.IsNullOrEmpty(status))
+        {
+            var msg = TextTruncation.Truncate(status, Console.WindowWidth);
+            Console.WriteLine(msg.PadRight(Console.WindowWidth));
+        }
+        else
+        {
+            Console.WriteLine("Use PageUp/PageDown. Type number+Enter to select, q to quit.");
+        }
         Console.SetCursorPosition(0, Console.WindowHeight - 1);
         Console.Write("Command (h for help)> ");
     }
