@@ -1,0 +1,27 @@
+# Build
+bin/
+obj/
+
+# User-specific
+*.user
+*.suo
+*.userprefs
+
+# Rider / VS Code
+.idea/
+.vscode/
+
+# Test results
+TestResult*/
+*.trx
+*.coverage*
+
+# Logs
+*.log
+
+# Artifacts
+artifacts/
+
+# OS
+.DS_Store
+Thumbs.db
