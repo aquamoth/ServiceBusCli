@@ -6,4 +6,11 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Azure.Core" Version="1.*" />
+    <PackageReference Include="Azure.Identity" Version="1.*" />
+    <PackageReference Include="Azure.ResourceManager" Version="1.*" />
+    <PackageReference Include="Azure.ResourceManager.ServiceBus" Version="1.*" />
+  </ItemGroup>
+
 </Project>

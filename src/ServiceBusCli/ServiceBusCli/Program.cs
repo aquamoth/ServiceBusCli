@@ -26,20 +26,19 @@ public class Program
             var themeResolved = ThemePresets.Resolve(theme, disableColor);
             try { Console.Title = "ServiceBusCli"; } catch { /* ignored in some terminals */ }
             Console.WriteLine($"ServiceBusCli — theme: {themeResolved.Name}");
-            if (!string.IsNullOrEmpty(ns))
-            {
-                Console.WriteLine($"Preselected namespace: {ns}");
-            }
-            if (!string.IsNullOrEmpty(q)) Console.WriteLine($"Queue: {q}");
-            if (!string.IsNullOrEmpty(t)) Console.WriteLine($"Topic: {t}");
-            if (!string.IsNullOrEmpty(s)) Console.WriteLine($"Subscription: {s}");
             Console.WriteLine($"Auth: {auth} Tenant: {tenant ?? "(default)"}");
-            Console.WriteLine();
-            Console.WriteLine("Scaffold ready. Next: discovery, selection UI, peek/paging.");
-            await Task.CompletedTask;
+            var cred = CredentialFactory.Create(auth, tenant);
+            var discovery = new ArmServiceBusDiscovery(cred);
+            var selected = await SelectionUi.SelectEntityAsync(discovery, ns, q, t, s);
+            if (selected is null)
+            {
+                Console.WriteLine("No entity selected. Exiting.");
+                return;
+            }
+            Console.WriteLine($"Selected: {selected.DisplayName}");
+            Console.WriteLine("Next step: list and page through messages, with bottom command line.");
         }, nsOption, queueOption, topicOption, subOption, authOption, tenantOption, themeOption, noColor);
 
         return await root.InvokeAsync(args);
     }
 }
-
