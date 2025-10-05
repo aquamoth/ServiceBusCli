@@ -8,7 +8,7 @@ namespace ServiceBusCli.Core;
 
 public interface IServiceBusDiscovery
 {
-    IAsyncEnumerable<SBNamespace> ListNamespacesAsync(CancellationToken ct = default);
+    IAsyncEnumerable<SBNamespace> ListNamespacesAsync(string? subscriptionId = null, CancellationToken ct = default);
     IAsyncEnumerable<QueueEntity> ListQueuesAsync(SBNamespace ns, CancellationToken ct = default);
     IAsyncEnumerable<SubscriptionEntity> ListSubscriptionsAsync(SBNamespace ns, CancellationToken ct = default);
 }
@@ -17,18 +17,55 @@ public sealed class ArmServiceBusDiscovery(TokenCredential credential) : IServic
 {
     private readonly ArmClient _arm = new(credential);
 
-    public async IAsyncEnumerable<SBNamespace> ListNamespacesAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    public async IAsyncEnumerable<SBNamespace> ListNamespacesAsync(string? subscriptionId = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        await foreach (SubscriptionResource sub in _arm.GetSubscriptions().GetAllAsync())
+        if (!string.IsNullOrWhiteSpace(subscriptionId))
         {
-            var subId = sub.Data.SubscriptionId;
+            SubscriptionResource sub;
+            try
+            {
+                var subId = subscriptionId!;
+                var subResId = SubscriptionResource.CreateResourceIdentifier(subId);
+                sub = _arm.GetSubscriptionResource(subResId);
+                await foreach (var _ in sub.GetLocationsAsync(cancellationToken: ct)) { break; } // touch to validate access
+            }
+            catch (RequestFailedException)
+            {
+                yield break;
+            }
+
+            var subIdStr = sub.Data.SubscriptionId;
             foreach (ServiceBusNamespaceResource ns in sub.GetServiceBusNamespaces())
             {
                 var fqdn = ns.Data?.ServiceBusEndpoint ?? $"{ns.Data?.Name}.servicebus.windows.net";
                 var rg = ns.Id.ResourceGroupName ?? string.Empty;
                 var name = ns.Data?.Name ?? ns.Id.Name;
-                yield return new SBNamespace(subId, rg, name, fqdn);
+                yield return new SBNamespace(subIdStr, rg, name, fqdn);
             }
+            yield break;
+        }
+
+        await foreach (SubscriptionResource sub in _arm.GetSubscriptions().GetAllAsync())
+        {
+            var subId = sub.Data.SubscriptionId;
+            var items = new List<SBNamespace>();
+            try
+            {
+                var page = sub.GetServiceBusNamespaces();
+                foreach (ServiceBusNamespaceResource ns in page)
+                {
+                    var fqdn = ns.Data?.ServiceBusEndpoint ?? $"{ns.Data?.Name}.servicebus.windows.net";
+                    var rg = ns.Id.ResourceGroupName ?? string.Empty;
+                    var name = ns.Data?.Name ?? ns.Id.Name;
+                    items.Add(new SBNamespace(subId, rg, name, fqdn));
+                }
+            }
+            catch (RequestFailedException ex) when (ex.Status == 403 || ex.Status == 401)
+            {
+                // Skip subscriptions we cannot enumerate
+                continue;
+            }
+            foreach (var item in items) yield return item;
         }
     }
 

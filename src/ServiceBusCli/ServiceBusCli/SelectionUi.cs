@@ -6,19 +6,34 @@ public static class SelectionUi
 {
     public static async Task<SBEntityId?> SelectEntityAsync(
         IServiceBusDiscovery discovery,
+        string? azureSubscriptionId,
         string? nsArg,
         string? queueArg,
         string? topicArg,
-        string? subArg,
+        string? topicSubscriptionArg,
         CancellationToken ct = default)
     {
         var namespaces = new List<SBNamespace>();
-        await foreach (var ns in discovery.ListNamespacesAsync(ct)) namespaces.Add(ns);
+        await foreach (var ns in discovery.ListNamespacesAsync(azureSubscriptionId, ct)) namespaces.Add(ns);
 
         SBNamespace? selectedNs = null;
         if (!string.IsNullOrWhiteSpace(nsArg))
         {
-            selectedNs = namespaces.FirstOrDefault(n => string.Equals(n.Name, nsArg, StringComparison.OrdinalIgnoreCase) || string.Equals(n.FullyQualifiedNamespace, nsArg, StringComparison.OrdinalIgnoreCase));
+            string Normalize(string s)
+            {
+                var v = s.Trim();
+                v = v.Replace("https://", string.Empty).Replace("http://", string.Empty).Replace("sb://", string.Empty);
+                if (v.EndsWith("/")) v = v[..^1];
+                // take host part if URL-like
+                var slash = v.IndexOf('/');
+                if (slash >= 0) v = v[..slash];
+                // strip :port
+                var colon = v.IndexOf(':');
+                if (colon >= 0) v = v[..colon];
+                return v.ToLowerInvariant();
+            }
+            var target = Normalize(nsArg);
+            selectedNs = namespaces.FirstOrDefault(n => Normalize(n.Name) == target || Normalize(n.FullyQualifiedNamespace) == target);
             if (selectedNs == null)
             {
                 Console.WriteLine($"Namespace '{nsArg}' not found among {namespaces.Count} discovered.");
@@ -57,9 +72,9 @@ public static class SelectionUi
         {
             preselected = entities.OfType<QueueEntity>().FirstOrDefault(x => string.Equals(x.QueueName, queueArg, StringComparison.OrdinalIgnoreCase));
         }
-        else if (!string.IsNullOrWhiteSpace(topicArg) && !string.IsNullOrWhiteSpace(subArg))
+        else if (!string.IsNullOrWhiteSpace(topicArg) && !string.IsNullOrWhiteSpace(topicSubscriptionArg))
         {
-            preselected = entities.OfType<SubscriptionEntity>().FirstOrDefault(x => string.Equals(x.TopicName, topicArg, StringComparison.OrdinalIgnoreCase) && string.Equals(x.SubscriptionName, subArg, StringComparison.OrdinalIgnoreCase));
+            preselected = entities.OfType<SubscriptionEntity>().FirstOrDefault(x => string.Equals(x.TopicName, topicArg, StringComparison.OrdinalIgnoreCase) && string.Equals(x.SubscriptionName, topicSubscriptionArg, StringComparison.OrdinalIgnoreCase));
         }
         if (preselected != null) return preselected;
 
@@ -87,4 +102,3 @@ public static class SelectionUi
         }
     }
 }
-
