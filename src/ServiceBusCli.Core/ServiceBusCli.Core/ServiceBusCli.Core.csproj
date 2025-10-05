@@ -11,6 +11,7 @@
     <PackageReference Include="Azure.Identity" Version="1.*" />
     <PackageReference Include="Azure.ResourceManager" Version="1.*" />
     <PackageReference Include="Azure.ResourceManager.ServiceBus" Version="1.*" />
+    <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.*" />
   </ItemGroup>
 
 </Project>

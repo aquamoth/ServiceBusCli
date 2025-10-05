@@ -40,16 +40,10 @@ public class Program
             try { Console.Title = "ServiceBusCli"; } catch { /* ignored in some terminals */ }
             Console.WriteLine($"ServiceBusCli — theme: {themeResolved.Name}");
             Console.WriteLine($"Auth: {auth} Tenant: {tenant ?? "(default)"}");
-            var cred = CredentialFactory.Create(auth, tenant);
+            var cred = CredentialFactory.Create(auth!, tenant);
             var discovery = new ArmServiceBusDiscovery(cred);
-            var selected = await SelectionUi.SelectEntityAsync(discovery, azSub, ns, q, t, tSub);
-            if (selected is null)
-            {
-                Console.WriteLine("No entity selected. Exiting.");
-                return;
-            }
-            Console.WriteLine($"Selected: {selected.DisplayName}");
-            Console.WriteLine("Next step: list and page through messages, with bottom command line.");
+            var app = new BrowserApp(cred, discovery, themeResolved, azSub, ns, q, t, tSub);
+            await app.RunAsync();
         });
 
         return await root.InvokeAsync(args);
