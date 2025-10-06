@@ -30,6 +30,10 @@ public sealed partial class BrowserApp
                 if (reduce > 0) { rgW -= reduce; deficit -= reduce; }
             }
         }
+        else if (occupied < total)
+        {
+            nameW += (total - occupied);
+        }
 
         ColorConsole.Write(Align("#", idxW, false), _theme.Control); Console.Write(" ");
         ColorConsole.Write(Align("Namespace", nameW, false), _theme.Control); Console.Write(" ");
@@ -75,6 +79,10 @@ public sealed partial class BrowserApp
                 reduce = Math.Min(deficit, statusW - 6);
                 if (reduce > 0) { statusW -= reduce; deficit -= reduce; }
             }
+        }
+        else if (occupied < total)
+        {
+            pathW += (total - occupied);
         }
 
         ColorConsole.Write(Align("#", idxW, false), _theme.Control); Console.Write(" ");
