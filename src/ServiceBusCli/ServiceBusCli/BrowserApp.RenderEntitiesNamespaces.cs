@@ -9,30 +9,41 @@ public sealed partial class BrowserApp
 {
     private void RenderNamespacesTable(List<SBNamespace> namespaces, int start, int count)
     {
-        var slice = namespaces.Skip(start).Take(count).ToList();
+        var ordered = namespaces.OrderBy(n => n.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        var slice = ordered.Skip(start).Take(count).ToList();
         if (slice.Count == 0) return;
 
         int idxW = Math.Max(2, (start + count).ToString().Length);
-        int nameW = Math.Max(12, Math.Min(48, slice.Max(n => n.Name.Length)));
-        int rgW = Math.Min(24, Math.Max(8, slice.Max(n => (n.ResourceGroup ?? string.Empty).Length)));
-        int subW = 8;
+        int nameMax = slice.Max(n => n.Name.Length);
+        int rgMax = slice.Max(n => (n.ResourceGroup ?? string.Empty).Length);
+        int subMax = slice.Max(n => (n.SubscriptionId ?? string.Empty).Length);
+        int nameW = Math.Max(12, nameMax);
+        int rgW = Math.Max(8, rgMax);
+        int subMin = 8; // short guid
+        int subW = Math.Max(subMin, subMax);
+        
 
         int total = Console.WindowWidth;
         int occupied = idxW + 1 + nameW + 1 + rgW + 1 + subW;
         if (occupied > total)
         {
             int deficit = occupied - total;
-            int reduce = Math.Min(deficit, nameW - 12);
-            if (reduce > 0) { nameW -= reduce; deficit -= reduce; }
+            int reduce = Math.Min(deficit, System.Math.Max(0, subW - subMin));
+            if (reduce > 0) { subW -= reduce; deficit -= reduce; }
             if (deficit > 0)
             {
-                reduce = Math.Min(deficit, rgW - 8);
+                reduce = Math.Min(deficit, System.Math.Max(0, rgW - 8));
                 if (reduce > 0) { rgW -= reduce; deficit -= reduce; }
+            }
+            if (deficit > 0)
+            {
+                reduce = Math.Min(deficit, System.Math.Max(0, nameW - 12));
+                if (reduce > 0) { nameW -= reduce; deficit -= reduce; }
             }
         }
         else if (occupied < total)
         {
-            nameW += (total - occupied);
+            // everything fits; leave whitespace to right
         }
 
         ColorConsole.Write(Align("#", idxW, false), _theme.Control); Console.Write(" ");
@@ -45,8 +56,8 @@ public sealed partial class BrowserApp
         {
             int globalIdx = start + i + 1;
             var ns = slice[i];
-            var subShort = ns.SubscriptionId ?? string.Empty;
-            if (subShort.Length > 8) subShort = subShort.Substring(0, 8);
+            var subFull = ns.SubscriptionId ?? string.Empty;
+            var subShort = subFull.Length > subW ? subFull.Substring(0, subW) : subFull;
 
             ColorConsole.Write(Align(globalIdx.ToString(), idxW, false), _theme.Number); Console.Write(" ");
             ColorConsole.Write(Align(TextTruncation.Truncate(ns.Name, nameW), nameW, false), _theme.Letters); Console.Write(" ");
@@ -58,13 +69,14 @@ public sealed partial class BrowserApp
 
     private void RenderEntitiesTable(IReadOnlyList<EntityRow> entities, int start, int count)
     {
-        var slice = entities.Skip(start).Take(count).ToList();
+        var ordered = entities.OrderBy(e => e.Path, StringComparer.OrdinalIgnoreCase).ToList();
+        var slice = ordered.Skip(start).Take(count).ToList();
         if (slice.Count == 0) return;
 
         int idxW = Math.Max(2, (start + count).ToString().Length);
         int kindW = 5;
-        int pathW = Math.Max(12, Math.Min(48, slice.Max(e => e.Path.Length)));
-        int statusW = Math.Min(10, Math.Max(6, slice.Max(e => (e.Status ?? string.Empty).Length)));
+        int pathW = Math.Max(12, slice.Max(e => e.Path.Length));
+        int statusW = System.Math.Max(6, slice.Max(e => (e.Status ?? string.Empty).Length));
         int numW = 8;
 
         int total = Console.WindowWidth;
@@ -82,7 +94,7 @@ public sealed partial class BrowserApp
         }
         else if (occupied < total)
         {
-            pathW += (total - occupied);
+            // everything fits; leave whitespace to right
         }
 
         ColorConsole.Write(Align("#", idxW, false), _theme.Control); Console.Write(" ");
