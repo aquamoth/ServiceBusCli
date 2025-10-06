@@ -4,7 +4,7 @@ using ServiceBusCli.Core;
 
 namespace ServiceBusCli;
 
-public sealed class BrowserApp
+public sealed partial class BrowserApp
 {
     private readonly TokenCredential _credential;
     private readonly IServiceBusDiscovery _discovery;
@@ -453,13 +453,7 @@ public sealed class BrowserApp
         }
         else if (view == View.Messages)
         {
-            Console.WriteLine("Seq            Enqueued              MessageId           Subject           Preview");
-            for (int i = 0; i < messages.Count; i++)
-            {
-                var m = messages[i];
-                var enq = m.Enqueued?.ToString("u") ?? "";
-                Console.WriteLine($"{m.SequenceNumber,12} {TextTruncation.Truncate(enq, 20),-20} {TextTruncation.Truncate(m.MessageId ?? string.Empty, 18),-18} {TextTruncation.Truncate(m.Subject ?? string.Empty, 16),-16} {TextTruncation.Truncate(m.Preview, Math.Max(20, Console.WindowWidth - 63))}");
-            }
+            RenderMessagesTable(messages);
         }
 
         // Footer / prompt line
