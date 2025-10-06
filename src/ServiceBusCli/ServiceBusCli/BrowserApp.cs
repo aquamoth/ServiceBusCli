@@ -203,9 +203,21 @@ public sealed class BrowserApp
                 {
                     var seq = cmd.Index!.Value;
                     var m = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
-                    if (m is not null)
+                    try
                     {
-                        try
+                        if (m is null)
+                        {
+                            // Jump to a page that should include seq
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                            var requested = Math.Max(1, Console.WindowHeight - 5);
+                            var startSeq = seq > requested ? seq - requested + 1 : seq; // try to center seq on page if possible
+                            pageHistory.Push(nextFromSequence);
+                            nextFromSequence = startSeq;
+                            messages.Clear();
+                            messages.AddRange(await FetchMessagesPageAsync(receiver!, startSeq, ct));
+                            m = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                        }
+                        if (m is not null)
                         {
                             var em = new EditorMessage(
                                 m.SequenceNumber,
@@ -218,14 +230,19 @@ public sealed class BrowserApp
                             );
                             await EditorLauncher.OpenMessageAsync(em, selectedEntity!, selectedNs!, _theme, ct);
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            status = $"Editor error: {ex.Message}";
+                            status = $"Sequence {seq} not found (may be expired).";
                         }
                     }
-                    else
+                    catch (Exception ex) when (IsUnauthorized(ex))
                     {
-                        status = $"Sequence {seq} not on current page.";
+                        view = View.Entities;
+                        status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
+                    }
+                    catch (Exception ex)
+                    {
+                        status = $"Open failed: {ex.Message}";
                     }
                 }
                 continue;
