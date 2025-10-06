@@ -57,6 +57,21 @@ Message Retrieval & Paging
 - Uses `ServiceBusReceiver.PeekMessagesAsync` to avoid locks. Maintains next sequence number to continue forward. Empty pages handled gracefully.
 - Queues use `CreateReceiver(queue)`. Subscriptions use `CreateReceiver(topic, subscription)`.
 
+Recent Changes (2025-10-06)
+- Sorting + selection: Namespaces sorted by Name, Entities sorted by Path. Selection indices map to this order; added unit tests to prove it.
+- Width logic improvements:
+  - Namespaces: Use natural max widths; if content fits, do not expand (leave right side empty). If not, shrink Sub→ResourceGroup→Namespace; Sub prints full when there is space, else short 8-char.
+  - Entities: Use natural Path/Status widths; shrink only when necessary; leave right side empty if content fits.
+  - Messages: Keep sequence-left minimal padding, short 8-char MessageId, optional Subject (omitted if all empty), per-character colored Preview, whitespace squashing in Preview, no overflow.
+- Session support: If entity requires sessions (or inferred from visible messages), a `Session` column (short 8-char) is shown after `MessageId`.
+- Navigation: ESC goes back using a generic view stack (Namespaces ← Entities ← Messages), restoring paging and selection state.
+- Stability: When switching namespaces/entities, receivers/clients are reset to avoid cross-namespace reuse (fixes 404/$management on prior namespace).
+
+Unit Tests
+- SelectionHelper ensures selection respects sorted order.
+  - Namespaces: `alpha`, `beta`, `gamma` returned for 1..3.
+  - Entities: sorted by Path; `queueA` before `queueB`.
+
 Command Set (initial)
 - `open <n>`: Open message number `n` from the current page in the external editor.
   - Editor resolution: `$VISUAL` → `$EDITOR` → OS default (`xdg-open`/`open`/`notepad`).
@@ -134,8 +149,17 @@ How We’ll Keep Style Parity
 - Port table measurement/truncation logic behaviorally (new code, matching outcomes).
 
 Next Steps (implementation)
-1) Message viewer: implement `open <n>` to launch external editor with full message (headers + body), honoring themes.
-2) SAS fallback: add `--connection-string` and env support; optional `--use-root-sas` that uses ARM ListKeys (explicit opt-in) for Owners without data-plane RBAC.
-3) UX parity: tighter table auto-sizing, terminal resize refresh, and colorization consistency with AppConfig CLI.
-4) Filters/search: inline filter for entities and messages.
-5) Tests: add coverage for paging math, unauthorized handling, and CLI option parsing.
+- Messages
+  - Minimize Enqueued/numeric widths based on visible rows (“only use needed”), like other pages.
+  - Add `goto <seq>` (jump without opening), and a footer hint.
+  - Editor aliases (`o <seq>`) and more structured views (JSON/YAML) parity with AppConfigCli.
+- Header/context
+  - Colorize and dynamically size the context line under the title (Namespace/Entity), mirroring AppConfigCli.
+- Discovery/auth
+  - SAS fallback: add `--connection-string` and env support; optional `--use-root-sas` (explicit) to fetch RootManageSharedAccessKey via ARM for Owners without data-plane RBAC.
+- Tables
+  - Apply full AppConfig-style table measurement to Namespaces/Entities (cursor/resize handling) and consider adding filter/search.
+- Navigation
+  - Breadcrumbs or quick jump keys; improve PageUp fallback logic (compute previous pages even without history) and test.
+- Tests
+  - Width logic tests for Namespaces/Entities/Messages; PageUp fallback; ESC stack behavior.

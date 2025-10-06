@@ -220,6 +220,8 @@ public sealed partial class BrowserApp
                             view = View.Messages;
                             pageHistory.Clear();
                             nextFromSequence = 0;
+                            if (receiver != null) { await receiver.CloseAsync(); receiver = null; }
+                            if (messageClient != null) { await messageClient.DisposeAsync(); messageClient = null; }
                             try
                             {
                                 sessionEnabled = await DetermineSessionEnabledAsync(selectedNs!, selectedEntity!, ct);
@@ -329,6 +331,8 @@ public sealed partial class BrowserApp
                             view = View.Messages;
                             pageHistory.Clear();
                             nextFromSequence = 0;
+                            if (receiver != null) { await receiver.CloseAsync(); receiver = null; }
+                            if (messageClient != null) { await messageClient.DisposeAsync(); messageClient = null; }
                             try
                             {
                                 sessionEnabled = await DetermineSessionEnabledAsync(selectedNs!, selectedEntity!, ct);
