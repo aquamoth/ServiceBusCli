@@ -46,6 +46,7 @@ public sealed partial class BrowserApp
     {
         var namespaces = new List<SBNamespace>();
         await foreach (var ns in _discovery.ListNamespacesAsync(_azureSubscriptionId, ct)) namespaces.Add(ns);
+        namespaces = SelectionHelper.SortNamespaces(namespaces).ToList();
 
         SBNamespace? selectedNs = null;
         SBEntityId? selectedEntity = null;
@@ -200,7 +201,8 @@ public sealed partial class BrowserApp
                             selectedNs = namespaces[idx];
                             view = View.Entities;
                             _entPage = 0;
-                            entities = await entitiesLister.ListEntitiesAsync(selectedNs, ct);
+                            entities = (await entitiesLister.ListEntitiesAsync(selectedNs, ct)).ToList();
+                            entities = SelectionHelper.SortEntities(entities).ToList();
                         }
                     }
                     else if (view == View.Entities)
@@ -303,7 +305,8 @@ public sealed partial class BrowserApp
                             selectedNs = namespaces[idx];
                             view = View.Entities;
                             _entPage = 0;
-                            entities = await entitiesLister.ListEntitiesAsync(selectedNs, ct);
+                            entities = (await entitiesLister.ListEntitiesAsync(selectedNs, ct)).ToList();
+                            entities = SelectionHelper.SortEntities(entities).ToList();
                         }
                     }
                     else if (view == View.Entities)
