@@ -30,6 +30,7 @@ public sealed partial class BrowserApp
     }
 
     private enum View { Namespaces, Entities, Messages }
+    private sealed record ViewState(View View, SBNamespace? Namespace, SBEntityId? Entity, int NsPage, int EntPage);
 
     private sealed record MessageRow(
         long SequenceNumber,
@@ -78,6 +79,7 @@ public sealed partial class BrowserApp
         var pageHistory = new Stack<long>();
         var messages = new List<MessageRow>();
         string? status = null;
+        var viewStack = new Stack<ViewState>();
 
         // If args include entity, resolve it and jump to messages
         if (selectedNs != null && (!string.IsNullOrWhiteSpace(_queueArg) || (!string.IsNullOrWhiteSpace(_topicArg) && !string.IsNullOrWhiteSpace(_tSubArg))))
@@ -100,6 +102,22 @@ public sealed partial class BrowserApp
             Render(view, namespaces, selectedNs, entities, selectedEntity, messages, status);
             var key = Console.ReadKey(true);
             if (key.Key == ConsoleKey.Q) break;
+            if (key.Key == ConsoleKey.Escape)
+            {
+                if (viewStack.Count > 0)
+                {
+                    var back = viewStack.Pop();
+                    view = back.View;
+                    selectedNs = back.Namespace;
+                    selectedEntity = back.Entity;
+                    _nsPage = back.NsPage;
+                    _entPage = back.EntPage;
+                    messages.Clear();
+                    pageHistory.Clear();
+                    nextFromSequence = 0;
+                }
+                continue;
+            }
             if (key.Key == ConsoleKey.PageDown)
             {
                 if (view == View.Namespaces) _nsPage++;
@@ -177,6 +195,8 @@ public sealed partial class BrowserApp
                         var idx = index;
                         if (idx >= 0 && idx < namespaces.Count)
                         {
+                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
+                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
                             selectedNs = namespaces[idx];
                             view = View.Entities;
                             _entPage = 0;
@@ -189,6 +209,7 @@ public sealed partial class BrowserApp
                         if (idx >= 0 && idx < entities.Count)
                         {
                             var e = entities[idx];
+                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
                             selectedEntity = e.Kind == EntityKind.Queue
                                 ? new QueueEntity(selectedNs!, e.Path)
                                 : new SubscriptionEntity(selectedNs!, e.Path.Split('/')[0], e.Path.Split('/')[2]);
@@ -277,6 +298,8 @@ public sealed partial class BrowserApp
                         var idx = n - 1;
                         if (idx >= 0 && idx < namespaces.Count)
                         {
+                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
+                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
                             selectedNs = namespaces[idx];
                             view = View.Entities;
                             _entPage = 0;
@@ -289,6 +312,7 @@ public sealed partial class BrowserApp
                         if (idx >= 0 && idx < entities.Count)
                         {
                             var e = entities[idx];
+                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
                             selectedEntity = e.Kind == EntityKind.Queue
                                 ? new QueueEntity(selectedNs!, e.Path)
                                 : new SubscriptionEntity(selectedNs!, e.Path.Split('/')[0], e.Path.Split('/')[2]);
