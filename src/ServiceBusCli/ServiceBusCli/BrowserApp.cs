@@ -129,9 +129,23 @@ public sealed partial class BrowserApp
             {
                 if (view == View.Namespaces && _nsPage > 0) _nsPage--;
                 else if (view == View.Entities && _entPage > 0) _entPage--;
-                else if (view == View.Messages && pageHistory.Count > 0)
+                else if (view == View.Messages)
                 {
-                    nextFromSequence = pageHistory.Pop();
+                    if (pageHistory.Count > 0)
+                    {
+                        nextFromSequence = pageHistory.Pop();
+                    }
+                    else if (messages.Count > 0)
+                    {
+                        var pageSize = Math.Max(1, Console.WindowHeight - 5);
+                        var firstSeq = messages.First().SequenceNumber;
+                        var prevStart = firstSeq > pageSize ? firstSeq - pageSize : 0;
+                        nextFromSequence = prevStart;
+                    }
+                    else
+                    {
+                        continue;
+                    }
                     try
                     {
                         (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
@@ -381,6 +395,7 @@ public sealed partial class BrowserApp
         {
             var s = body.ToString();
             s = s.Replace('\n', ' ').Replace('\r', ' ');
+            s = System.Text.RegularExpressions.Regex.Replace(s, "\\s+", " ").Trim();
             return TextTruncation.Truncate(s, Math.Max(20, Console.WindowWidth - 40));
         }
         catch
