@@ -31,7 +31,15 @@ public sealed class BrowserApp
 
     private enum View { Namespaces, Entities, Messages }
 
-    private sealed record MessageRow(long SequenceNumber, DateTimeOffset? Enqueued, string? MessageId, string? Subject, string Preview);
+    private sealed record MessageRow(
+        long SequenceNumber,
+        DateTimeOffset? Enqueued,
+        string? MessageId,
+        string? Subject,
+        string? ContentType,
+        string Preview,
+        BinaryData Body,
+        IReadOnlyDictionary<string, object> ApplicationProperties);
 
     public async Task RunAsync(CancellationToken ct = default)
     {
@@ -190,6 +198,31 @@ public sealed class BrowserApp
                 {
                     // No-op; header shows basic help
                 }
+                else if (view == View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
+                {
+                    var indexOnPage = cmd.Index.Value - 1;
+                    if (indexOnPage >= 0 && indexOnPage < messages.Count)
+                    {
+                        var m = messages[indexOnPage];
+                        try
+                        {
+                            var em = new EditorMessage(
+                                m.SequenceNumber,
+                                m.Enqueued,
+                                m.MessageId,
+                                m.Subject,
+                                m.ContentType,
+                                m.Body,
+                                m.ApplicationProperties
+                            );
+                            await EditorLauncher.OpenMessageAsync(em, selectedEntity!, selectedNs!, _theme, ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            status = $"Editor error: {ex.Message}";
+                        }
+                    }
+                }
                 continue;
             }
             // Numeric shortcut: single digit selects without typing 'open'
@@ -285,7 +318,16 @@ public sealed class BrowserApp
             foreach (var m in msgs)
             {
                 var body = TryPreview(m.Body);
-                list.Add(new MessageRow(m.SequenceNumber, m.EnqueuedTime, m.MessageId, m.Subject, body));
+                list.Add(new MessageRow(
+                    m.SequenceNumber,
+                    m.EnqueuedTime,
+                    m.MessageId,
+                    m.Subject,
+                    m.ContentType,
+                    body,
+                    m.Body,
+                    new Dictionary<string, object>(m.ApplicationProperties)
+                ));
             }
             return list;
         }
@@ -296,7 +338,16 @@ public sealed class BrowserApp
             foreach (var m in msgs)
             {
                 var body = TryPreview(m.Body);
-                list.Add(new MessageRow(m.SequenceNumber, m.EnqueuedTime, m.MessageId, m.Subject, body));
+                list.Add(new MessageRow(
+                    m.SequenceNumber,
+                    m.EnqueuedTime,
+                    m.MessageId,
+                    m.Subject,
+                    m.ContentType,
+                    body,
+                    m.Body,
+                    new Dictionary<string, object>(m.ApplicationProperties)
+                ));
             }
             return list;
         }
