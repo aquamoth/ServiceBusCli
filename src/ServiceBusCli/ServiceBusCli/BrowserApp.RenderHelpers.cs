@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Collections.Generic;
+using System.Text;
 using ServiceBusCli.Core;
 
 namespace ServiceBusCli;
@@ -47,7 +48,7 @@ public sealed partial class BrowserApp
                 Console.Write(Align(TextTruncation.Truncate(subjStr, subjW), subjW, padLeft: false));
             }
             Console.Write(" ");
-            Console.Write(Align(TextTruncation.Truncate(prevStr, previewW), previewW, padLeft: false));
+            WriteColorized(prevStr, previewW);
             Console.WriteLine();
         }
     }
@@ -104,5 +105,40 @@ public sealed partial class BrowserApp
 
         return (seqW, enqW, idW, subjW, previewW, showSubject);
     }
-}
 
+    private void WriteColorized(string text, int width)
+    {
+        if (width <= 0) return;
+        var t = TextTruncation.Truncate(text ?? string.Empty, width);
+        ConsoleColor current = Console.ForegroundColor;
+        ConsoleColor? active = null;
+        var sb = new StringBuilder();
+
+        ConsoleColor ColorFor(char ch)
+        {
+            if (char.IsControl(ch)) return _theme.Control;
+            if (char.IsDigit(ch)) return _theme.Number;
+            if (char.IsLetter(ch)) return _theme.Letters;
+            return _theme.Default;
+        }
+
+        foreach (var ch in t)
+        {
+            var col = ColorFor(ch);
+            if (active == null) { active = col; }
+            if (col != active)
+            {
+                ColorConsole.Write(sb.ToString(), active.Value);
+                sb.Clear();
+                active = col;
+            }
+            sb.Append(ch);
+        }
+        if (sb.Length > 0 && active != null)
+        {
+            ColorConsole.Write(sb.ToString(), active.Value);
+        }
+        var pad = width - t.Length;
+        if (pad > 0) Console.Write(new string(' ', pad));
+    }
+}

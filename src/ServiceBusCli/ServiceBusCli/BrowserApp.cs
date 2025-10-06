@@ -446,25 +446,12 @@ public sealed partial class BrowserApp
         if (view == View.Namespaces)
         {
             var (start, count, _, _, _) = Page(_nsPage, namespaces.Count);
-            for (int i = 0; i < count; i++)
-            {
-                var idx = start + i;
-                var ns = namespaces[idx];
-                Console.WriteLine($"{idx + 1,4}. {ns.Name,-30} {ns.ResourceGroup,-24} {ns.SubscriptionId}");
-            }
+            RenderNamespacesTable(namespaces, start, count);
         }
         else if (view == View.Entities)
         {
             var (start, count, _, _, _) = Page(_entPage, entities.Count);
-            // Header
-            Console.WriteLine("  #  Kind  Path                                    Status       Total    Active   DLQ");
-            for (int i = 0; i < count; i++)
-            {
-                var idx = start + i;
-                var e = entities[idx];
-                var kind = e.Kind == EntityKind.Queue ? "Queue" : "Sub  ";
-                Console.WriteLine($"{idx + 1,4}. {kind} {TextTruncation.Truncate(e.Path, 40),-40} {TextTruncation.Truncate(e.Status, 10),-10} {e.Total,8} {e.Active,8} {e.DeadLetter,8}");
-            }
+            RenderEntitiesTable(entities, start, count);
         }
         else if (view == View.Messages)
         {
