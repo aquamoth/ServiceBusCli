@@ -13,12 +13,15 @@ Tech Stack
 - Azure SDKs: `Azure.Identity`, `Azure.ResourceManager`, `Azure.ResourceManager.ServiceBus`, `Azure.Messaging.ServiceBus`.
 - Cross-platform external editor integration (VISUAL/EDITOR env vars; platform fallbacks).
 
-High-Level Flow (v0)
-1) Auth & discovery: Sign in (AAD) and enumerate Service Bus namespaces the user can access via ARM. Expand to queues and topic subscriptions.
-2) Pre-select via CLI: If a namespace and entity are provided as args, skip selection UI.
-3) Selection UI: If not preselected, show a list (numbered) of resources to choose, mirroring the AppConfig app’s login/selection flow and style.
-4) Main screen: List messages of the selected entity (queue or topic-subscription) with PageUp/PageDown paging and a bottom command line.
-5) Command: `open <n>` opens the selected message in the external editor, using the same editor selection logic and colorized preview style.
+High-Level Flow (v0) — Implemented So Far
+1) Auth & discovery (AAD): Enumerate Service Bus namespaces via ARM. Handles `--subscription <azure-sub-id>` to scope discovery and skips unauthorized subs.
+2) Preselection via CLI: `--namespace`, `--queue` or `--topic --topic-subscription` jump directly into deeper views if resolvable.
+3) TUI browser:
+   - Namespaces view: paged list with global numbering; type number+Enter to select.
+   - Entities view: queues + topic subscriptions with Status, Total, Active, DLQ counts; global numbering; number+Enter to select.
+   - Messages view: peek active messages; PageDown forward pagination and PageUp across cached pages; footer command line.
+4) Unauthorized handling: if peeking messages is unauthorized, show a persistent footer status and stay in Entities view.
+5) Theming and colorization basics are in place (same palette roles as AppConfig).
 
 Resource Model
 - Resource selection is two-stage:
@@ -33,27 +36,26 @@ Auth
 - Data plane requires `Azure Service Bus Data Receiver/Sender` or `Owner` on the entity/namespace. ARM discovery requires Reader/contributor access at subscription/RG/namespace scope.
 - Environment fallbacks: respect `AZURE_TENANT_ID` if provided.
 
-CLI Options (initial)
-- `--namespace <name|resource-id>`: Preselect a namespace (name or full ARM ID).
+CLI Options (current)
+- `--subscription <azure-sub-id>`: Azure subscription filter for ARM discovery.
+- `--namespace <name|fqdn>`: Namespace to preselect (accepts FQDN like `sh-dev-bus.servicebus.windows.net`).
 - `--queue <name>`: Preselect a queue in the selected namespace.
-- `--topic <name>` and `--subscription <name>`: Preselect a topic/subscription entity.
+- `--topic <name>` and `--topic-subscription <name>`: Preselect a topic subscription.
 - `--auth <auto|device|browser|cli|vscode>`: Auth mode (default: auto).
 - `--tenant <guid>`: Entra tenant ID.
-- `--theme <name>`: Theme preset (`default`, `mono`, `no-color`, `solarized`), same as AppConfig CLI.
+- `--theme <name>`: Theme preset (`default`, `mono`, `no-color`, `solarized`).
 - `--no-color`: Disable color output.
 
-UI/UX Parity with AppConfig CLI
-- Header: Title, page indicator `PAGE x/y` right-aligned. Below, the selected Namespace/Entity (colorized), and any active filters.
-- List: Non-wrapping, fits to terminal width with per-page dynamic column sizing. Columns: `#`, `Seq`, `Enqueued`, `Expires`, `MessageId`, `Subject`, `[Props]`, `Preview`.
-- Paging: `PageUp`/`PageDown` navigates message pages; terminal resize triggers a refresh and reflow.
-- Bottom command line: `Command (h for help)>` identical style.
-- Themes & colorization: Reuse the same palette and rules; keys (property names) vs values colorized similarly to AppConfig’s key/value schema.
+UI/UX Parity with AppConfig CLI (current)
+- Header: Title with right-aligned `PAGE x/y`, selection context below.
+- Lists: Global row numbering across pages; non-wrapping; dynamic sizing. Entities show columns: `#`, `Kind`, `Path`, `Status`, `Total`, `Active`, `DLQ`.
+- Paging: `PageUp`/`PageDown` on all views (messages use forward peek; PageUp navigates cached pages).
+- Footer: Command prompt; persistent status line for errors (e.g., unauthorized).
+- Themes: Same palette roles; more colorization parity to follow.
 
 Message Retrieval & Paging
-- Use `Azure.Messaging.ServiceBus` receivers in Peek mode to avoid locks: `PeekMessagesAsync(pageSize)` and `PeekFromSequenceNumberAsync` for forward paging.
-- Page size default: 50 (configurable). Maintain last seen sequence number per page to continue with `+1` for the next page.
-- Subscriptions: open a receiver for `topic/subscription`. Queues: open a queue receiver.
-- Note: Peek is read-only (safe); not all queues may have messages; handle empty pages gracefully.
+- Uses `ServiceBusReceiver.PeekMessagesAsync` to avoid locks. Maintains next sequence number to continue forward. Empty pages handled gracefully.
+- Queues use `CreateReceiver(queue)`. Subscriptions use `CreateReceiver(topic, subscription)`.
 
 Command Set (initial)
 - `open <n>`: Open message number `n` from the current page in the external editor.
@@ -73,12 +75,11 @@ Message Display & Colorization
 Editing Semantics (Future)
 - Out of scope for v0: editing and resubmitting messages. Later phases can allow cloning a message, editing properties/body, and sending to a target entity or dead-letter queue.
 
-Project Layout (planned)
+Project Layout
 - Solution: `ServiceBusCli.sln`
-- `src/ServiceBusCli.Core`: Domain models, paging, colorizer, table layout, command parser, ARM discovery abstractions.
-- `src/ServiceBusCli`: Console app (UI, rendering, external editor, key handling, command loop).
-- `tests/ServiceBusCli.Core.Tests`: Unit tests for Core helpers.
-- `tests/ServiceBusCli.Tests`: App-level tests (parser, range mapping, editor/CLI plumbing).
+- `src/ServiceBusCli.Core`: Domain (models, theme, parser, table, discovery, entities lister).
+- `src/ServiceBusCli`: Console app (BrowserApp TUI, CLI wiring).
+- `tests/ServiceBusCli.Core.Tests`, `tests/ServiceBusCli.Tests`: Unit tests (parser, truncation, sanity).
 
 Code Reuse Strategy (no changes to old app)
 - Replicate the visual style by porting the minimal set of abstractions/ideas:
@@ -107,11 +108,9 @@ Build/Run (planned)
 - Themes: `--theme default|mono|no-color|solarized`, `--no-color`.
 
 Permissions & Environment
-- ARM discovery requires Reader access to enumerate Service Bus namespaces and entities.
-- Data plane requires `Azure Service Bus Data Receiver` (and later `Data Sender` for editing/publish).
-- Environment variables honored:
-  - `AZURE_TENANT_ID`: tenant; overrides default.
-  - `SERVICEBUSCLI_THEME` and `SERVICEBUSCLI_NO_COLOR`: mirror CLI flags.
+- ARM discovery: Reader access (or higher) on subscription/RG/namespace. Owner on ARM does not confer data-plane rights.
+- Data plane (messages): requires `Azure Service Bus Data Receiver` (Listen) at namespace or entity scope; `Data Owner` grants Manage+Send+Listen.
+- Environment variables: `AZURE_TENANT_ID` (tenant), and future `SERVICEBUS_CONNECTION_STRING` for SAS fallback (see Next Steps).
 
 Risks & Mitigations
 - Large namespaces/entities: cap list and page sizes; lazy-load; add per-page timeouts.
@@ -120,9 +119,9 @@ Risks & Mitigations
 - Throttling: conservative retries on data-plane; cancellable operations; do not block UI.
 
 Open Questions
-- Editing: Is the first edit flow “clone and send to entity X”, or “unlock, modify in place” (not generally supported) or “dead-letter manipulation”?
-- Filters: Should we add server-side filters (e.g., subject contains, time range) before v1?
-- Selection semantics: Add an active row cursor for quick `open` without specifying `n`?
+- Editing flow: clone-and-send vs DLQ flows; in-place edits not generally supported.
+- Filters: add server-side filter options (subject contains, time range)?
+- Selection: add active row cursor for quick selection without entering numbers?
 
 Milestones
 1) v0.1: Auth + discovery UI; preselect via CLI; list messages with paging; `open <n>` in external editor; themes/colorization.
@@ -134,11 +133,9 @@ How We’ll Keep Style Parity
 - Re-implement theme presets and color roles 1:1.
 - Port table measurement/truncation logic behaviorally (new code, matching outcomes).
 
-Next Steps (for implementation)
-1) Scaffold solution/projects and theme/table/colorizer helpers.
-2) Implement ARM discovery (namespaces → queues/topics → subs) and selection UI.
-3) Wire AAD auth options (modes, tenant) like AppConfig CLI.
-4) Implement Service Bus peek paging and main list UI.
-5) Add command loop with `open <n>` and external editor integration.
-6) Add unit test skeletons and wire CI later.
-
+Next Steps (implementation)
+1) Message viewer: implement `open <n>` to launch external editor with full message (headers + body), honoring themes.
+2) SAS fallback: add `--connection-string` and env support; optional `--use-root-sas` that uses ARM ListKeys (explicit opt-in) for Owners without data-plane RBAC.
+3) UX parity: tighter table auto-sizing, terminal resize refresh, and colorization consistency with AppConfig CLI.
+4) Filters/search: inline filter for entities and messages.
+5) Tests: add coverage for paging math, unauthorized handling, and CLI option parsing.
