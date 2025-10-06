@@ -37,6 +37,7 @@ public sealed partial class BrowserApp
         DateTimeOffset? Enqueued,
         string? MessageId,
         string? Subject,
+        string? SessionId,
         string? ContentType,
         string Preview,
         BinaryData Body,
@@ -81,6 +82,7 @@ public sealed partial class BrowserApp
         var messages = new List<MessageRow>();
         string? status = null;
         var viewStack = new Stack<ViewState>();
+        bool? sessionEnabled = null;
 
         // If args include entity, resolve it and jump to messages
         if (selectedNs != null && (!string.IsNullOrWhiteSpace(_queueArg) || (!string.IsNullOrWhiteSpace(_topicArg) && !string.IsNullOrWhiteSpace(_tSubArg))))
@@ -220,6 +222,11 @@ public sealed partial class BrowserApp
                             nextFromSequence = 0;
                             try
                             {
+                                sessionEnabled = await DetermineSessionEnabledAsync(selectedNs!, selectedEntity!, ct);
+                            }
+                            catch { sessionEnabled = null; }
+                            try
+                            {
                                 (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
                                 messages.Clear();
                                 messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
@@ -324,6 +331,11 @@ public sealed partial class BrowserApp
                             nextFromSequence = 0;
                             try
                             {
+                                sessionEnabled = await DetermineSessionEnabledAsync(selectedNs!, selectedEntity!, ct);
+                            }
+                            catch { sessionEnabled = null; }
+                            try
+                            {
                                 (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
                                 messages.Clear();
                                 messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
@@ -386,6 +398,7 @@ public sealed partial class BrowserApp
                     m.EnqueuedTime,
                     m.MessageId,
                     m.Subject,
+                    m.SessionId,
                     m.ContentType,
                     body,
                     m.Body,
@@ -406,6 +419,7 @@ public sealed partial class BrowserApp
                     m.EnqueuedTime,
                     m.MessageId,
                     m.Subject,
+                    m.SessionId,
                     m.ContentType,
                     body,
                     m.Body,
@@ -499,4 +513,26 @@ public sealed partial class BrowserApp
         Console.SetCursorPosition(0, Console.WindowHeight - 1);
         Console.Write("Command (h for help)> ");
     }
+
+
+    private async System.Threading.Tasks.Task<bool> DetermineSessionEnabledAsync(SBNamespace ns, SBEntityId entity, System.Threading.CancellationToken ct)
+    {
+        var admin = new Azure.Messaging.ServiceBus.Administration.ServiceBusAdministrationClient(ns.FullyQualifiedNamespace, _credential);
+        try
+        {
+            if (entity is QueueEntity q)
+            {
+                var qp = await admin.GetQueueAsync(q.QueueName, ct);
+                return qp.Value.RequiresSession;
+            }
+            else if (entity is SubscriptionEntity s)
+            {
+                var sp = await admin.GetSubscriptionAsync(s.TopicName, s.SubscriptionName, ct);
+                return sp.Value.RequiresSession;
+            }
+        }
+        catch { }
+        return false;
+    }
+
 }

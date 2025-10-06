@@ -11,13 +11,20 @@ public sealed partial class BrowserApp
     private void RenderMessagesTable(IReadOnlyList<MessageRow> messages)
     {
         var totalWidth = Console.WindowWidth;
-        var (seqW, enqW, idW, subjW, previewW, showSubject) = ComputeMessageColumnWidths(messages, totalWidth);
+        bool showSubject = messages.Any(m => !string.IsNullOrEmpty(m.Subject));
+        bool showSession = messages.Any(m => !string.IsNullOrEmpty(m.SessionId));
+        var (seqW, enqW, idW, sessW, subjW, previewW) = ComputeMessageColumnWidths(messages, totalWidth, showSubject, showSession);
         // Header
         ColorConsole.Write("Seq".PadRight(seqW), _theme.Number);
         Console.Write(" ");
         ColorConsole.Write("Enqueued".PadRight(enqW), _theme.Control);
         Console.Write(" ");
         ColorConsole.Write("MessageId".PadRight(idW), _theme.Letters);
+        if (showSession)
+        {
+            Console.Write(" ");
+            ColorConsole.Write("Session".PadRight(sessW), _theme.Control);
+        }
         if (showSubject)
         {
             Console.Write(" ");
@@ -34,6 +41,8 @@ public sealed partial class BrowserApp
             var enqStr = (m.Enqueued?.ToString("u") ?? string.Empty);
             var idStr = (m.MessageId ?? string.Empty);
             if (idStr.Length > 8) idStr = idStr.Substring(0, 8);
+            var sessStr = (m.SessionId ?? string.Empty);
+            if (sessStr.Length > 8) sessStr = sessStr.Substring(0, 8);
             var subjStr = (m.Subject ?? string.Empty);
             var prevStr = m.Preview;
 
@@ -42,6 +51,11 @@ public sealed partial class BrowserApp
             Console.Write(Align(TextTruncation.Truncate(enqStr, enqW), enqW, padLeft: false));
             Console.Write(" ");
             ColorConsole.Write(Align(TextTruncation.Truncate(idStr, idW), idW, padLeft: false), _theme.Letters);
+            if (showSession)
+            {
+                Console.Write(" ");
+                Console.Write(Align(TextTruncation.Truncate(sessStr, sessW), sessW, padLeft: false));
+            }
             if (showSubject)
             {
                 Console.Write(" ");
@@ -61,25 +75,26 @@ public sealed partial class BrowserApp
         return padLeft ? pad + text : text + pad;
     }
 
-    private static (int seqW, int enqW, int idW, int subjW, int previewW, bool showSubject)
-        ComputeMessageColumnWidths(IReadOnlyList<MessageRow> messages, int totalWidth)
+    private static (int seqW, int enqW, int idW, int sessW, int subjW, int previewW)
+        ComputeMessageColumnWidths(IReadOnlyList<MessageRow> messages, int totalWidth, bool showSubject, bool showSession)
     {
         int minPreview = 10;
         int spaceBetween = 1;
         int seqW = Math.Max(3, messages.Count == 0 ? 3 : messages.Max(m => m.SequenceNumber.ToString().Length));
-        int enqW = messages.Any(m => m.Enqueued.HasValue) ? 20 : 0; // 'u' format ~20
-        int idW = 8; // short id view
-        bool showSubject = messages.Any(m => !string.IsNullOrEmpty(m.Subject));
-        int subjW = showSubject ? Math.Min(24, Math.Max(8, messages.Max(m => (m.Subject ?? string.Empty).Length))) : 0;
+        int enqW = messages.Any(m => m.Enqueued.HasValue) ? Math.Max(12, Math.Min(20, messages.Max(m => (m.Enqueued?.ToString("u") ?? string.Empty).Length))) : 0;
+        int idW = 8;
+        int sessW = showSession ? 8 : 0;
+        int subjW = showSubject ? Math.Max(8, messages.Max(m => (m.Subject ?? string.Empty).Length)) : 0;
 
-        int columns = 1; // preview only
+        int columns = 1;
         if (seqW > 0) columns++;
         if (enqW > 0) columns++;
         if (idW > 0) columns++;
+        if (sessW > 0) columns++;
         if (showSubject) columns++;
 
         int spaces = (columns - 1) * spaceBetween;
-        int occupied = seqW + enqW + idW + subjW + spaces;
+        int occupied = seqW + enqW + idW + sessW + subjW + spaces;
         int previewW = Math.Max(minPreview, totalWidth - occupied);
 
         if (previewW < minPreview)
@@ -89,6 +104,11 @@ public sealed partial class BrowserApp
             {
                 int reduce = Math.Min(deficit, subjW);
                 subjW -= reduce; deficit -= reduce;
+            }
+            if (deficit > 0 && sessW > 0)
+            {
+                int reduce = Math.Min(deficit, Math.Max(0, sessW - 4));
+                sessW -= reduce; deficit -= reduce;
             }
             if (deficit > 0 && enqW > 12)
             {
@@ -103,7 +123,7 @@ public sealed partial class BrowserApp
             previewW = minPreview;
         }
 
-        return (seqW, enqW, idW, subjW, previewW, showSubject);
+        return (seqW, enqW, idW, sessW, subjW, previewW);
     }
 
     private void WriteColorized(string text, int width)
