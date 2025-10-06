@@ -10,7 +10,7 @@ public class ParserTests
     {
         var cmd = CommandParser.Parse("open 12");
         cmd.Kind.Should().Be(CommandKind.Open);
-        cmd.Index.Should().Be(12);
+        cmd.Index.Should().Be(12L);
     }
 
     [Fact]
@@ -45,4 +45,3 @@ public class TextTruncationTests
         TextTruncation.Truncate("abc", 5).Should().Be("abc");
     }
 }
-

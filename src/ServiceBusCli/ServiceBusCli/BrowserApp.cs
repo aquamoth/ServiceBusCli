@@ -156,7 +156,8 @@ public sealed class BrowserApp
                 if (cmd.Kind == CommandKind.Quit) break;
                 if (view != View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
                 {
-                    var index = cmd.Index.Value - 1; // global index (1-based display)
+                    if (cmd.Index is null || cmd.Index.Value > int.MaxValue) { continue; }
+                    var index = (int)cmd.Index.Value - 1; // global index (1-based display)
                     if (view == View.Namespaces)
                     {
                         var idx = index;
@@ -200,10 +201,10 @@ public sealed class BrowserApp
                 }
                 else if (view == View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
                 {
-                    var indexOnPage = cmd.Index.Value - 1;
-                    if (indexOnPage >= 0 && indexOnPage < messages.Count)
+                    var seq = cmd.Index!.Value;
+                    var m = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                    if (m is not null)
                     {
-                        var m = messages[indexOnPage];
                         try
                         {
                             var em = new EditorMessage(
@@ -221,6 +222,10 @@ public sealed class BrowserApp
                         {
                             status = $"Editor error: {ex.Message}";
                         }
+                    }
+                    else
+                    {
+                        status = $"Sequence {seq} not on current page.";
                     }
                 }
                 continue;
@@ -431,12 +436,12 @@ public sealed class BrowserApp
         }
         else if (view == View.Messages)
         {
-            Console.WriteLine("  #   Seq           Enqueued              MessageId           Subject           Preview");
+            Console.WriteLine("Seq            Enqueued              MessageId           Subject           Preview");
             for (int i = 0; i < messages.Count; i++)
             {
                 var m = messages[i];
                 var enq = m.Enqueued?.ToString("u") ?? "";
-                Console.WriteLine($"{i + 1,3}. {m.SequenceNumber,12} {TextTruncation.Truncate(enq, 20),-20} {TextTruncation.Truncate(m.MessageId ?? string.Empty, 18),-18} {TextTruncation.Truncate(m.Subject ?? string.Empty, 16),-16} {TextTruncation.Truncate(m.Preview, Math.Max(20, Console.WindowWidth - 75))}");
+                Console.WriteLine($"{m.SequenceNumber,12} {TextTruncation.Truncate(enq, 20),-20} {TextTruncation.Truncate(m.MessageId ?? string.Empty, 18),-18} {TextTruncation.Truncate(m.Subject ?? string.Empty, 16),-16} {TextTruncation.Truncate(m.Preview, Math.Max(20, Console.WindowWidth - 63))}");
             }
         }
 

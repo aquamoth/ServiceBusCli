@@ -10,7 +10,7 @@ public enum CommandKind
     Open
 }
 
-public sealed record ParsedCommand(CommandKind Kind, int? Index = null, string? Raw = null);
+public sealed record ParsedCommand(CommandKind Kind, long? Index = null, string? Raw = null);
 
 public static class CommandParser
 {
@@ -24,9 +24,8 @@ public static class CommandParser
         if (string.Equals(text, "q", StringComparison.OrdinalIgnoreCase) || string.Equals(text, "quit", StringComparison.OrdinalIgnoreCase) || string.Equals(text, "exit", StringComparison.OrdinalIgnoreCase))
             return new ParsedCommand(CommandKind.Quit, Raw: text);
         var m = OpenRe.Match(text);
-        if (m.Success && int.TryParse(m.Groups["n"].Value, out var n))
+        if (m.Success && long.TryParse(m.Groups["n"].Value, out var n))
             return new ParsedCommand(CommandKind.Open, Index: n, Raw: text);
         return new ParsedCommand(CommandKind.None, Raw: text);
     }
 }
-
