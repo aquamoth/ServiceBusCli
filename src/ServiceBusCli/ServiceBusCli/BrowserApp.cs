@@ -157,7 +157,8 @@ public sealed partial class BrowserApp
                             {
                                 (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
                                 messages.Clear();
-                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                                var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
                                 _msgPage++;
                                 // Do not refresh active count on every page to keep paging snappy
                             }
@@ -196,7 +197,8 @@ public sealed partial class BrowserApp
                     {
                         (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
                         messages.Clear();
-                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                        var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
                         _msgPage = Math.Max(1, _msgPage - 1);
                         // Do not refresh active count on every page to keep paging snappy
                     }
@@ -265,7 +267,8 @@ public sealed partial class BrowserApp
                             {
                                 (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
                                 messages.Clear();
-                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                                var req3 = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req3, ct));
                                 try { _activeMessageCount = await GetActiveMessageCountAsync(selectedNs!, selectedEntity!, ct); } catch { _activeMessageCount = null; }
                             }
                             catch (Exception ex) when (IsUnauthorized(ex))
@@ -295,7 +298,8 @@ public sealed partial class BrowserApp
                             pageHistory.Push(nextFromSequence);
                             nextFromSequence = startSeq;
                             messages.Clear();
-                            messages.AddRange(await FetchMessagesPageAsync(receiver!, startSeq, ct));
+                            var req2 = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                            messages.AddRange(await FetchMessagesPageAsync(receiver!, startSeq, req2, ct));
                             _msgPage++;
                             m = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
                             if (m is null)
@@ -401,6 +405,18 @@ public sealed partial class BrowserApp
         return (start, count, page, totalPages, pageSize);
     }
 
+    private static (int start, int count, int page, int totalPages, int pageSize) PageWithReserved(int page, int total, int extraReserved)
+    {
+        var height = Console.WindowHeight;
+        var reserved = 6 + Math.Max(0, extraReserved); // add context lines
+        var pageSize = Math.Max(1, height - reserved);
+        var totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
+        page = Math.Clamp(page, 0, totalPages - 1);
+        var start = page * pageSize;
+        var count = Math.Max(0, Math.Min(pageSize, total - start));
+        return (start, count, page, totalPages, pageSize);
+    }
+
     private async Task<(ServiceBusClient client, ServiceBusReceiver? receiver)> EnsureReceiverAsync(SBNamespace ns, SBEntityId entity, ServiceBusClient? client, ServiceBusReceiver? rcv, CancellationToken ct)
     {
         client ??= new ServiceBusClient(ns.FullyQualifiedNamespace, _credential);
@@ -413,9 +429,21 @@ public sealed partial class BrowserApp
         return (client, receiver);
     }
 
-    private async Task<List<MessageRow>> FetchMessagesPageAsync(ServiceBusReceiver rcv, long fromSeq, CancellationToken ct)
+    private int GetMessagePageRequestRows(View view, SBNamespace? ns, SBEntityId? entity)
     {
-        int requested = Math.Max(1, Console.WindowHeight - 6); // leave extra row for footer overlap mitigation
+        int width = Console.WindowWidth;
+        int ctx = RenderContextLinesForMeasure(view, ns, entity, width);
+        return Math.Max(1, Console.WindowHeight - 6 - ctx);
+    }
+
+    private int RenderContextLinesForMeasure(View view, SBNamespace? ns, SBEntityId? entity, int width)
+    {
+        // We constrain context to a single line in this UI
+        return (view == View.Entities && ns != null) || (view == View.Messages && ns != null && entity != null) ? 1 : 0;
+    }
+
+    private async Task<List<MessageRow>> FetchMessagesPageAsync(ServiceBusReceiver rcv, long fromSeq, int requested, CancellationToken ct)
+    {
         long start = Math.Max(1, fromSeq);
         var msgs = await rcv.PeekMessagesAsync(requested, fromSequenceNumber: start, cancellationToken: ct);
         var list = new List<MessageRow>(msgs.Count);
@@ -470,10 +498,8 @@ public sealed partial class BrowserApp
         var title = view switch
         {
             View.Namespaces => "Service Bus: Select Namespace",
-            View.Entities => $"Namespace: {selectedNs!.Name} — Select Queue/Subscription",
-            View.Messages => selectedEntity is QueueEntity q
-                ? $"{selectedNs!.Name} — Queue {q.QueueName}"
-                : selectedEntity is SubscriptionEntity s ? $"{selectedNs!.Name} — Subscription {s.TopicName}/{s.SubscriptionName}" : "Messages",
+            View.Entities => "Select Queue/Subscription",
+            View.Messages => "Messages",
             _ => "Service Bus"
         };
         string pageStr = string.Empty;
@@ -503,15 +529,17 @@ public sealed partial class BrowserApp
         }
         var width = Console.WindowWidth;
         Console.WriteLine(TextTruncation.Truncate(title.PadRight(Math.Max(0, width - pageStr.Length)) + pageStr, width));
+        // Render colored single-line context under the title (fits width)
+        int ctxLines = RenderContextLines(view, selectedNs, selectedEntity, width);
 
         if (view == View.Namespaces)
         {
-            var (start, count, _, _, _) = Page(_nsPage, namespaces.Count);
+            var (start, count, _, _, _) = PageWithReserved(_nsPage, namespaces.Count, ctxLines);
             RenderNamespacesTable(namespaces, start, count);
         }
         else if (view == View.Entities)
         {
-            var (start, count, _, _, _) = Page(_entPage, entities.Count);
+            var (start, count, _, _, _) = PageWithReserved(_entPage, entities.Count, ctxLines);
             RenderEntitiesTable(entities, start, count);
         }
         else if (view == View.Messages)
@@ -536,6 +564,58 @@ public sealed partial class BrowserApp
         var contentWidth = Math.Max(1, width2 - prompt.Length);
         var line = prompt + TextTruncation.Truncate(inputView, contentWidth).PadRight(contentWidth);
         Console.Write(TextTruncation.Truncate(line, width2).PadRight(width2));
+    }
+
+    private int RenderContextLines(View view, SBNamespace? ns, SBEntityId? entity, int width)
+    {
+        var segments = new List<(string label, string value)>();
+        if (view == View.Entities && ns != null)
+            segments.Add(("Namespace:", ns.Name));
+        else if (view == View.Messages && ns != null && entity != null)
+        {
+            segments.Add(("Namespace:", ns.Name));
+            switch (entity)
+            {
+                case QueueEntity q:
+                    segments.Add(("Queue:", q.QueueName));
+                    break;
+                case SubscriptionEntity s:
+                    segments.Add(("Subscription:", $"{s.TopicName}/{s.SubscriptionName}"));
+                    break;
+            }
+        }
+        if (segments.Count == 0) return 0;
+
+        int col = 0;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var (label, value) = segments[i];
+            int needed = (col > 0 ? 2 : 0) + label.Length + 1 + value.Length; // gap + label + space + value
+            if (needed > Math.Max(1, width - col))
+            {
+                // Need to truncate the value to fit on a single line
+                if (col > 0)
+                {
+                    Console.Write("  ");
+                    col += 2;
+                }
+                ColorConsole.Write(label + " ", _theme.Control);
+                int rem = Math.Max(1, width - (col + label.Length + 1));
+                WriteColorized(TextTruncation.Truncate(value, rem), rem);
+                Console.WriteLine();
+                return 1;
+            }
+            if (col > 0)
+            {
+                Console.Write("  ");
+                col += 2;
+            }
+            ColorConsole.Write(label + " ", _theme.Control);
+            WriteColorized(value, value.Length);
+            col += label.Length + 1 + value.Length;
+        }
+        Console.WriteLine();
+        return 1;
     }
 
     private void RedrawPrompt(LineEditorEngine editor)
