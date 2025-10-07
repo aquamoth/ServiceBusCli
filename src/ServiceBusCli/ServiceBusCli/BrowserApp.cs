@@ -32,16 +32,7 @@ public sealed partial class BrowserApp
     private enum View { Namespaces, Entities, Messages }
     private sealed record ViewState(View View, SBNamespace? Namespace, SBEntityId? Entity, int NsPage, int EntPage);
 
-    private sealed record MessageRow(
-        long SequenceNumber,
-        DateTimeOffset? Enqueued,
-        string? MessageId,
-        string? Subject,
-        string? SessionId,
-        string? ContentType,
-        string Preview,
-        BinaryData Body,
-        IReadOnlyDictionary<string, object> ApplicationProperties);
+    // moved to its own file for reuse in helpers/tests
 
     public async Task RunAsync(CancellationToken ct = default)
     {
@@ -290,13 +281,33 @@ public sealed partial class BrowserApp
                         {
                             // Jump to a page that should include seq
                             (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
-                            var requested = Math.Max(1, Console.WindowHeight - 5);
+                            var requested = Math.Max(1, Console.WindowHeight - 6);
                             var startSeq = seq > requested ? seq - requested + 1 : seq; // try to center seq on page if possible
                             pageHistory.Push(nextFromSequence);
                             nextFromSequence = startSeq;
                             messages.Clear();
                             messages.AddRange(await FetchMessagesPageAsync(receiver!, startSeq, ct));
                             m = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                            if (m is null)
+                            {
+                                // Fallback: exact single peek
+                                var single = await receiver!.PeekMessagesAsync(1, fromSequenceNumber: seq, cancellationToken: ct);
+                                var mm = single.FirstOrDefault();
+                                if (mm is not null && mm.SequenceNumber == seq)
+                                {
+                                    m = new MessageRow(
+                                        mm.SequenceNumber,
+                                        mm.EnqueuedTime,
+                                        mm.MessageId,
+                                        mm.Subject,
+                                        mm.SessionId,
+                                        mm.ContentType,
+                                        TryPreview(mm.Body),
+                                        mm.Body,
+                                        new Dictionary<string, object>(mm.ApplicationProperties)
+                                    );
+                                }
+                            }
                         }
                         if (m is not null)
                         {
