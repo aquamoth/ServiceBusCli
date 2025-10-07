@@ -102,6 +102,8 @@ public sealed partial class BrowserApp
 
         var editor = new LineEditorEngine();
         editor.SetInitial(string.Empty);
+        var history = new List<string>();
+        var historyNav = new HistoryNavigator(history);
         bool needsRender = true;
         while (true)
         {
@@ -134,12 +136,14 @@ public sealed partial class BrowserApp
             // Editing: backspace in command buffer
             if (key.Key == ConsoleKey.Backspace)
             {
+                historyNav.TransitionToDraftFromHistory(editor.Buffer.ToString());
                 editor.Backspace();
                 RedrawPrompt(editor);
                 continue;
             }
             if (key.Key == ConsoleKey.Delete)
             {
+                historyNav.TransitionToDraftFromHistory(editor.Buffer.ToString());
                 editor.Delete();
                 RedrawPrompt(editor);
                 continue;
@@ -210,8 +214,15 @@ public sealed partial class BrowserApp
             if (key.Key == ConsoleKey.Enter)
             {
                 // Parse and execute current command-line buffer
-                var cmd = CommandParser.Parse(editor.Buffer.ToString());
+                var lineText = editor.Buffer.ToString();
+                var cmd = CommandParser.Parse(lineText);
                 editor.SetInitial(string.Empty);
+                if (!string.IsNullOrWhiteSpace(lineText))
+                {
+                    if (history.Count == 0 || !string.Equals(history[^1], lineText, StringComparison.Ordinal))
+                        history.Add(lineText);
+                    historyNav.ResetToBottom();
+                }
                 if (cmd.Kind == CommandKind.Quit) break;
                 if (view != View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
                 {
@@ -323,16 +334,31 @@ public sealed partial class BrowserApp
             {
                 if (key.Key == ConsoleKey.LeftArrow) { editor.CtrlWordLeft(); RedrawPrompt(editor); continue; }
                 if (key.Key == ConsoleKey.RightArrow) { editor.CtrlWordRight(); RedrawPrompt(editor); continue; }
-                if (key.Key == ConsoleKey.Backspace) { editor.CtrlWordBackspace(); RedrawPrompt(editor); continue; }
-                if (key.Key == ConsoleKey.Delete) { editor.CtrlWordDelete(); RedrawPrompt(editor); continue; }
+                if (key.Key == ConsoleKey.Backspace) { historyNav.TransitionToDraftFromHistory(editor.Buffer.ToString()); editor.CtrlWordBackspace(); RedrawPrompt(editor); continue; }
+                if (key.Key == ConsoleKey.Delete) { historyNav.TransitionToDraftFromHistory(editor.Buffer.ToString()); editor.CtrlWordDelete(); RedrawPrompt(editor); continue; }
             }
             // Arrow/Home/End
             if (key.Key == ConsoleKey.LeftArrow) { editor.Left(); RedrawPrompt(editor); continue; }
             if (key.Key == ConsoleKey.RightArrow) { editor.Right(); RedrawPrompt(editor); continue; }
             if (key.Key == ConsoleKey.Home) { editor.Home(); RedrawPrompt(editor); continue; }
             if (key.Key == ConsoleKey.End) { editor.End(); RedrawPrompt(editor); continue; }
+            // History navigation
+            if (key.Key == ConsoleKey.UpArrow)
+            {
+                var newText = historyNav.Up(editor.Buffer.ToString());
+                if (!ReferenceEquals(newText, null)) { editor.SetInitial(newText); }
+                RedrawPrompt(editor);
+                continue;
+            }
+            if (key.Key == ConsoleKey.DownArrow)
+            {
+                var newText = historyNav.Down(editor.Buffer.ToString());
+                if (!ReferenceEquals(newText, null)) { editor.SetInitial(newText); }
+                RedrawPrompt(editor);
+                continue;
+            }
             // Default insert
-            if (!char.IsControl(key.KeyChar)) { editor.Insert(key.KeyChar); RedrawPrompt(editor); continue; }
+            if (!char.IsControl(key.KeyChar)) { historyNav.TransitionToDraftFromHistory(editor.Buffer.ToString()); editor.Insert(key.KeyChar); RedrawPrompt(editor); continue; }
         }
 
         if (receiver != null) await receiver.CloseAsync();
@@ -468,7 +494,7 @@ public sealed partial class BrowserApp
         }
         else
         {
-            Console.WriteLine("Use PageUp/PageDown, ESC to go back. Type a number to select, or commands like 'open 5', 'quit', 'help'.");
+            Console.WriteLine("Use PageUp/PageDown, ESC to go back. Up/Down navigate command history. Type a number to select, or commands like 'open 5', 'quit', 'help'.");
         }
         Console.SetCursorPosition(0, Console.WindowHeight - 1);
         var prompt = "Command (h for help)> ";
