@@ -77,7 +77,7 @@ public sealed partial class BrowserApp
         // Messages view state
         ServiceBusClient? messageClient = null;
         ServiceBusReceiver? receiver = null;
-        long nextFromSequence = 0; // 0 => start of queue/subscription
+        long nextFromSequence = 1; // explicit start of queue/subscription
         var pageHistory = new Stack<long>();
         var messages = new List<MessageRow>();
         string? status = null;
@@ -100,10 +100,18 @@ public sealed partial class BrowserApp
             }
         }
 
-        var input = string.Empty; // command-line buffer
+        var editor = new LineEditorEngine();
+        editor.SetInitial(string.Empty);
+        bool needsRender = true;
         while (true)
         {
-            Render(view, namespaces, selectedNs, entities, selectedEntity, messages, status, input);
+            if (needsRender)
+            {
+                var inputView = editor.GetView(Math.Max(1, Console.WindowWidth - "Command (h for help)> ".Length));
+                Render(view, namespaces, selectedNs, entities, selectedEntity, messages, status, inputView);
+                PositionPromptCursor(editor);
+                needsRender = false;
+            }
             var key = Console.ReadKey(true);
             // Only special hotkeys: ESC to navigate back, PageUp/PageDown for paging.
             if (key.Key == ConsoleKey.Escape)
@@ -118,17 +126,22 @@ public sealed partial class BrowserApp
                     _entPage = back.EntPage;
                     messages.Clear();
                     pageHistory.Clear();
-                    nextFromSequence = 0;
+                    nextFromSequence = 1;
                 }
+                needsRender = true;
                 continue;
             }
             // Editing: backspace in command buffer
             if (key.Key == ConsoleKey.Backspace)
             {
-                if (input.Length > 0)
-                {
-                    input = input[..^1];
-                }
+                editor.Backspace();
+                RedrawPrompt(editor);
+                continue;
+            }
+            if (key.Key == ConsoleKey.Delete)
+            {
+                editor.Delete();
+                RedrawPrompt(editor);
                 continue;
             }
             if (key.Key == ConsoleKey.PageDown)
@@ -139,7 +152,8 @@ public sealed partial class BrowserApp
                 {
                     if (messages.Count > 0)
                     {
-                        pageHistory.Push(nextFromSequence);
+                        var currentFirst = messages.FirstOrDefault()?.SequenceNumber ?? nextFromSequence;
+                        pageHistory.Push(currentFirst);
                         nextFromSequence = messages.Last().SequenceNumber + 1;
                         try
                         {
@@ -154,6 +168,7 @@ public sealed partial class BrowserApp
                         }
                         }
                 }
+                needsRender = true;
                 continue;
             }
             if (key.Key == ConsoleKey.PageUp)
@@ -168,9 +183,9 @@ public sealed partial class BrowserApp
                     }
                     else if (messages.Count > 0)
                     {
-                        var pageSize = Math.Max(1, Console.WindowHeight - 5);
+                        var pageSize = Math.Max(1, Console.WindowHeight - 6);
                         var firstSeq = messages.First().SequenceNumber;
-                        var prevStart = firstSeq > pageSize ? firstSeq - pageSize : 0;
+                        var prevStart = firstSeq > pageSize ? firstSeq - pageSize : 1;
                         nextFromSequence = prevStart;
                     }
                     else
@@ -189,13 +204,14 @@ public sealed partial class BrowserApp
                         status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
                     }
                 }
+                needsRender = true;
                 continue;
             }
             if (key.Key == ConsoleKey.Enter)
             {
                 // Parse and execute current command-line buffer
-                var cmd = CommandParser.Parse(input);
-                input = string.Empty;
+                var cmd = CommandParser.Parse(editor.Buffer.ToString());
+                editor.SetInitial(string.Empty);
                 if (cmd.Kind == CommandKind.Quit) break;
                 if (view != View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
                 {
@@ -227,7 +243,7 @@ public sealed partial class BrowserApp
                                 : new SubscriptionEntity(selectedNs!, e.Path.Split('/')[0], e.Path.Split('/')[2]);
                             view = View.Messages;
                             pageHistory.Clear();
-                            nextFromSequence = 0;
+                            nextFromSequence = 1;
                             if (receiver != null) { await receiver.CloseAsync(); receiver = null; }
                             if (messageClient != null) { await messageClient.DisposeAsync(); messageClient = null; }
                             try
@@ -299,14 +315,24 @@ public sealed partial class BrowserApp
                         status = $"Open failed: {ex.Message}";
                     }
                 }
+                needsRender = true;
                 continue;
             }
-            // Default: append printable characters to input buffer
-            if (!char.IsControl(key.KeyChar))
+            // Ctrl word-nav/edit
+            if (key.Modifiers.HasFlag(ConsoleModifiers.Control))
             {
-                input += key.KeyChar;
-                continue;
+                if (key.Key == ConsoleKey.LeftArrow) { editor.CtrlWordLeft(); RedrawPrompt(editor); continue; }
+                if (key.Key == ConsoleKey.RightArrow) { editor.CtrlWordRight(); RedrawPrompt(editor); continue; }
+                if (key.Key == ConsoleKey.Backspace) { editor.CtrlWordBackspace(); RedrawPrompt(editor); continue; }
+                if (key.Key == ConsoleKey.Delete) { editor.CtrlWordDelete(); RedrawPrompt(editor); continue; }
             }
+            // Arrow/Home/End
+            if (key.Key == ConsoleKey.LeftArrow) { editor.Left(); RedrawPrompt(editor); continue; }
+            if (key.Key == ConsoleKey.RightArrow) { editor.Right(); RedrawPrompt(editor); continue; }
+            if (key.Key == ConsoleKey.Home) { editor.Home(); RedrawPrompt(editor); continue; }
+            if (key.Key == ConsoleKey.End) { editor.End(); RedrawPrompt(editor); continue; }
+            // Default insert
+            if (!char.IsControl(key.KeyChar)) { editor.Insert(key.KeyChar); RedrawPrompt(editor); continue; }
         }
 
         if (receiver != null) await receiver.CloseAsync();
@@ -342,49 +368,26 @@ public sealed partial class BrowserApp
 
     private async Task<List<MessageRow>> FetchMessagesPageAsync(ServiceBusReceiver rcv, long fromSeq, CancellationToken ct)
     {
-        int requested = Math.Max(1, Console.WindowHeight - 5);
-        if (fromSeq > 0)
+        int requested = Math.Max(1, Console.WindowHeight - 6); // leave extra row for footer overlap mitigation
+        long start = Math.Max(1, fromSeq);
+        var msgs = await rcv.PeekMessagesAsync(requested, fromSequenceNumber: start, cancellationToken: ct);
+        var list = new List<MessageRow>(msgs.Count);
+        foreach (var m in msgs)
         {
-            var msgs = await rcv.PeekMessagesAsync(requested, fromSequenceNumber: fromSeq, cancellationToken: ct);
-            var list = new List<MessageRow>(msgs.Count);
-            foreach (var m in msgs)
-            {
-                var body = TryPreview(m.Body);
-                list.Add(new MessageRow(
-                    m.SequenceNumber,
-                    m.EnqueuedTime,
-                    m.MessageId,
-                    m.Subject,
-                    m.SessionId,
-                    m.ContentType,
-                    body,
-                    m.Body,
-                    new Dictionary<string, object>(m.ApplicationProperties)
-                ));
-            }
-            return list;
+            var body = TryPreview(m.Body);
+            list.Add(new MessageRow(
+                m.SequenceNumber,
+                m.EnqueuedTime,
+                m.MessageId,
+                m.Subject,
+                m.SessionId,
+                m.ContentType,
+                body,
+                m.Body,
+                new Dictionary<string, object>(m.ApplicationProperties)
+            ));
         }
-        else
-        {
-            var msgs = await rcv.PeekMessagesAsync(maxMessages: requested, fromSequenceNumber: null, cancellationToken: ct);
-            var list = new List<MessageRow>(msgs.Count);
-            foreach (var m in msgs)
-            {
-                var body = TryPreview(m.Body);
-                list.Add(new MessageRow(
-                    m.SequenceNumber,
-                    m.EnqueuedTime,
-                    m.MessageId,
-                    m.Subject,
-                    m.SessionId,
-                    m.ContentType,
-                    body,
-                    m.Body,
-                    new Dictionary<string, object>(m.ApplicationProperties)
-                ));
-            }
-            return list;
-        }
+        return list;
     }
 
     private static string TryPreview(BinaryData body)
@@ -414,7 +417,7 @@ public sealed partial class BrowserApp
 
     // Status is rendered by Render() when provided
 
-    private void Render(View view, List<SBNamespace> namespaces, SBNamespace? selectedNs, IReadOnlyList<EntityRow> entities, SBEntityId? selectedEntity, IReadOnlyList<MessageRow> messages, string? status, string input)
+    private void Render(View view, List<SBNamespace> namespaces, SBNamespace? selectedNs, IReadOnlyList<EntityRow> entities, SBEntityId? selectedEntity, IReadOnlyList<MessageRow> messages, string? status, string inputView)
     {
         Console.Clear();
         var title = view switch
@@ -468,8 +471,40 @@ public sealed partial class BrowserApp
             Console.WriteLine("Use PageUp/PageDown, ESC to go back. Type a number to select, or commands like 'open 5', 'quit', 'help'.");
         }
         Console.SetCursorPosition(0, Console.WindowHeight - 1);
-        var prompt = $"Command (h for help)> {input}";
-        Console.Write(TextTruncation.Truncate(prompt, Console.WindowWidth).PadRight(Console.WindowWidth));
+        var prompt = "Command (h for help)> ";
+        var width2 = Console.WindowWidth;
+        var contentWidth = Math.Max(1, width2 - prompt.Length);
+        var line = prompt + TextTruncation.Truncate(inputView, contentWidth).PadRight(contentWidth);
+        Console.Write(TextTruncation.Truncate(line, width2).PadRight(width2));
+    }
+
+    private void RedrawPrompt(LineEditorEngine editor)
+    {
+        try
+        {
+            var width = Console.WindowWidth;
+            var prompt = "Command (h for help)> ";
+            var contentWidth = Math.Max(1, width - prompt.Length);
+            editor.EnsureVisible(contentWidth);
+            var view = editor.GetView(contentWidth);
+            Console.SetCursorPosition(0, Console.WindowHeight - 1);
+            var line = prompt + view.PadRight(contentWidth);
+            Console.Write(TextTruncation.Truncate(line, width).PadRight(width));
+            PositionPromptCursor(editor);
+        }
+        catch { }
+    }
+
+    private void PositionPromptCursor(LineEditorEngine editor)
+    {
+        try
+        {
+            var prompt = "Command (h for help)> ";
+            var col = prompt.Length + Math.Max(0, editor.Cursor - editor.ScrollStart);
+            var row = Console.WindowHeight - 1;
+            Console.SetCursorPosition(Math.Min(col, Math.Max(0, Console.WindowWidth - 1)), row);
+        }
+        catch { }
     }
 
 
