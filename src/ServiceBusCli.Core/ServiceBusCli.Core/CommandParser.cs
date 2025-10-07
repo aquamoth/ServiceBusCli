@@ -23,6 +23,9 @@ public static class CommandParser
         if (text is "h" or "help" or "?" or "H" or "HELP" or "?") return new ParsedCommand(CommandKind.Help, Raw: text);
         if (string.Equals(text, "q", StringComparison.OrdinalIgnoreCase) || string.Equals(text, "quit", StringComparison.OrdinalIgnoreCase) || string.Equals(text, "exit", StringComparison.OrdinalIgnoreCase))
             return new ParsedCommand(CommandKind.Quit, Raw: text);
+        // Numeric-only input: treat as global index selection (open)
+        if (text.All(char.IsDigit) && long.TryParse(text, out var num))
+            return new ParsedCommand(CommandKind.Open, Index: num, Raw: text);
         var m = OpenRe.Match(text);
         if (m.Success && long.TryParse(m.Groups["n"].Value, out var n))
             return new ParsedCommand(CommandKind.Open, Index: n, Raw: text);

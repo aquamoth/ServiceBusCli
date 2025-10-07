@@ -100,11 +100,12 @@ public sealed partial class BrowserApp
             }
         }
 
+        var input = string.Empty; // command-line buffer
         while (true)
         {
-            Render(view, namespaces, selectedNs, entities, selectedEntity, messages, status);
+            Render(view, namespaces, selectedNs, entities, selectedEntity, messages, status, input);
             var key = Console.ReadKey(true);
-            if (key.Key == ConsoleKey.Q) break;
+            // Only special hotkeys: ESC to navigate back, PageUp/PageDown for paging.
             if (key.Key == ConsoleKey.Escape)
             {
                 if (viewStack.Count > 0)
@@ -118,6 +119,15 @@ public sealed partial class BrowserApp
                     messages.Clear();
                     pageHistory.Clear();
                     nextFromSequence = 0;
+                }
+                continue;
+            }
+            // Editing: backspace in command buffer
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (input.Length > 0)
+                {
+                    input = input[..^1];
                 }
                 continue;
             }
@@ -183,11 +193,9 @@ public sealed partial class BrowserApp
             }
             if (key.Key == ConsoleKey.Enter)
             {
-                // Read a command line
-                Console.SetCursorPosition(0, Console.WindowHeight - 1);
-                Console.Write("Command (h for help)> ");
-                var line = Console.ReadLine() ?? string.Empty;
-                var cmd = CommandParser.Parse(line);
+                // Parse and execute current command-line buffer
+                var cmd = CommandParser.Parse(input);
+                input = string.Empty;
                 if (cmd.Kind == CommandKind.Quit) break;
                 if (view != View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
                 {
@@ -293,65 +301,10 @@ public sealed partial class BrowserApp
                 }
                 continue;
             }
-            // Numeric shortcut: single digit selects without typing 'open'
-            if (char.IsDigit(key.KeyChar))
+            // Default: append printable characters to input buffer
+            if (!char.IsControl(key.KeyChar))
             {
-                var digit = key.KeyChar.ToString();
-                Console.SetCursorPosition(0, Console.WindowHeight - 1);
-                Console.Write($"Command (h for help)> {digit}");
-                var rest = Console.ReadLine() ?? string.Empty;
-                if (int.TryParse(digit + rest, out var n))
-                {
-                    var cmd = new ParsedCommand(CommandKind.Open, n);
-                    // Re-run same as above, but reuse logic
-                    if (view == View.Namespaces)
-                    {
-                        var idx = n - 1;
-                        if (idx >= 0 && idx < namespaces.Count)
-                        {
-                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
-                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
-                            selectedNs = namespaces[idx];
-                            view = View.Entities;
-                            _entPage = 0;
-                            entities = (await entitiesLister.ListEntitiesAsync(selectedNs, ct)).ToList();
-                            entities = SelectionHelper.SortEntities(entities).ToList();
-                        }
-                    }
-                    else if (view == View.Entities)
-                    {
-                        var idx = n - 1;
-                        if (idx >= 0 && idx < entities.Count)
-                        {
-                            var e = entities[idx];
-                            viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
-                            selectedEntity = e.Kind == EntityKind.Queue
-                                ? new QueueEntity(selectedNs!, e.Path)
-                                : new SubscriptionEntity(selectedNs!, e.Path.Split('/')[0], e.Path.Split('/')[2]);
-                            view = View.Messages;
-                            pageHistory.Clear();
-                            nextFromSequence = 0;
-                            if (receiver != null) { await receiver.CloseAsync(); receiver = null; }
-                            if (messageClient != null) { await messageClient.DisposeAsync(); messageClient = null; }
-                            try
-                            {
-                                sessionEnabled = await DetermineSessionEnabledAsync(selectedNs!, selectedEntity!, ct);
-                            }
-                            catch { sessionEnabled = null; }
-                            try
-                            {
-                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
-                                messages.Clear();
-                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
-                            }
-                            catch (Exception ex) when (IsUnauthorized(ex))
-                            {
-                                view = View.Entities;
-                                status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
-                            }
-                        }
-                    }
-                }
+                input += key.KeyChar;
                 continue;
             }
         }
@@ -461,7 +414,7 @@ public sealed partial class BrowserApp
 
     // Status is rendered by Render() when provided
 
-    private void Render(View view, List<SBNamespace> namespaces, SBNamespace? selectedNs, IReadOnlyList<EntityRow> entities, SBEntityId? selectedEntity, IReadOnlyList<MessageRow> messages, string? status)
+    private void Render(View view, List<SBNamespace> namespaces, SBNamespace? selectedNs, IReadOnlyList<EntityRow> entities, SBEntityId? selectedEntity, IReadOnlyList<MessageRow> messages, string? status, string input)
     {
         Console.Clear();
         var title = view switch
@@ -512,10 +465,11 @@ public sealed partial class BrowserApp
         }
         else
         {
-            Console.WriteLine("Use PageUp/PageDown. Type number+Enter to select, q to quit.");
+            Console.WriteLine("Use PageUp/PageDown, ESC to go back. Type a number to select, or commands like 'open 5', 'quit', 'help'.");
         }
         Console.SetCursorPosition(0, Console.WindowHeight - 1);
-        Console.Write("Command (h for help)> ");
+        var prompt = $"Command (h for help)> {input}";
+        Console.Write(TextTruncation.Truncate(prompt, Console.WindowWidth).PadRight(Console.WindowWidth));
     }
 
 
