@@ -9,6 +9,8 @@ public sealed partial class BrowserApp
     private readonly TokenCredential _credential;
     private readonly IServiceBusDiscovery _discovery;
     private readonly Theme _theme;
+    private long? _activeMessageCount; // runtime ActiveMessageCount for current entity
+    private int _msgPage = 1; // messages view page index (1-based)
 
     private readonly string? _azureSubscriptionId;
     private readonly string? _nsArg;
@@ -120,6 +122,7 @@ public sealed partial class BrowserApp
                     messages.Clear();
                     pageHistory.Clear();
                     nextFromSequence = 1;
+                    _msgPage = 1;
                 }
                 needsRender = true;
                 continue;
@@ -150,17 +153,19 @@ public sealed partial class BrowserApp
                         var currentFirst = messages.FirstOrDefault()?.SequenceNumber ?? nextFromSequence;
                         pageHistory.Push(currentFirst);
                         nextFromSequence = messages.Last().SequenceNumber + 1;
-                        try
-                        {
-                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
-                            messages.Clear();
-                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
-                        }
-                        catch (Exception ex) when (IsUnauthorized(ex))
-                        {
-                            view = View.Entities;
-                            status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
-                        }
+                            try
+                            {
+                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                                messages.Clear();
+                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                                _msgPage++;
+                                // Do not refresh active count on every page to keep paging snappy
+                            }
+                            catch (Exception ex) when (IsUnauthorized(ex))
+                            {
+                                view = View.Entities;
+                                status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
+                            }
                         }
                 }
                 needsRender = true;
@@ -192,6 +197,8 @@ public sealed partial class BrowserApp
                         (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
                         messages.Clear();
                         messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                        _msgPage = Math.Max(1, _msgPage - 1);
+                        // Do not refresh active count on every page to keep paging snappy
                     }
                     catch (Exception ex) when (IsUnauthorized(ex))
                     {
@@ -246,6 +253,7 @@ public sealed partial class BrowserApp
                             view = View.Messages;
                             pageHistory.Clear();
                             nextFromSequence = 1;
+                            _msgPage = 1;
                             if (receiver != null) { await receiver.CloseAsync(); receiver = null; }
                             if (messageClient != null) { await messageClient.DisposeAsync(); messageClient = null; }
                             try
@@ -258,6 +266,7 @@ public sealed partial class BrowserApp
                                 (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
                                 messages.Clear();
                                 messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, ct));
+                                try { _activeMessageCount = await GetActiveMessageCountAsync(selectedNs!, selectedEntity!, ct); } catch { _activeMessageCount = null; }
                             }
                             catch (Exception ex) when (IsUnauthorized(ex))
                             {
@@ -287,6 +296,7 @@ public sealed partial class BrowserApp
                             nextFromSequence = startSeq;
                             messages.Clear();
                             messages.AddRange(await FetchMessagesPageAsync(receiver!, startSeq, ct));
+                            _msgPage++;
                             m = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
                             if (m is null)
                             {
@@ -382,7 +392,7 @@ public sealed partial class BrowserApp
     private static (int start, int count, int page, int totalPages, int pageSize) Page(int page, int total)
     {
         var height = Console.WindowHeight;
-        var reserved = 5; // header + footer lines
+        var reserved = 6; // title (1) + table header (3) + footer (2)
         var pageSize = Math.Max(1, height - reserved);
         var totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
         page = Math.Clamp(page, 0, totalPages - 1);
@@ -477,9 +487,22 @@ public sealed partial class BrowserApp
             var pi = Page(_entPage, entities.Count);
             pageStr = $"PAGE {pi.page + 1}/{Math.Max(1, pi.totalPages)}";
         }
+        else if (view == View.Messages)
+        {
+            int pageSize = Math.Max(1, Console.WindowHeight - 6);
+            int current = Math.Max(1, _msgPage);
+            if (_activeMessageCount.HasValue)
+            {
+                int totalPages = Math.Max(1, (int)Math.Ceiling(_activeMessageCount.Value / (double)pageSize));
+                pageStr = $"PAGE {current}/{totalPages}";
+            }
+            else
+            {
+                pageStr = $"PAGE {current}";
+            }
+        }
         var width = Console.WindowWidth;
         Console.WriteLine(TextTruncation.Truncate(title.PadRight(Math.Max(0, width - pageStr.Length)) + pageStr, width));
-        Console.WriteLine();
 
         if (view == View.Namespaces)
         {
@@ -563,6 +586,26 @@ public sealed partial class BrowserApp
         }
         catch { }
         return false;
+    }
+
+    private async System.Threading.Tasks.Task<long?> GetActiveMessageCountAsync(SBNamespace ns, SBEntityId entity, System.Threading.CancellationToken ct)
+    {
+        var admin = new Azure.Messaging.ServiceBus.Administration.ServiceBusAdministrationClient(ns.FullyQualifiedNamespace, _credential);
+        try
+        {
+            if (entity is QueueEntity q)
+            {
+                var rp = await admin.GetQueueRuntimePropertiesAsync(q.QueueName, ct);
+                return rp.Value.ActiveMessageCount;
+            }
+            else if (entity is SubscriptionEntity s)
+            {
+                var rp = await admin.GetSubscriptionRuntimePropertiesAsync(s.TopicName, s.SubscriptionName, ct);
+                return rp.Value.ActiveMessageCount;
+            }
+        }
+        catch { }
+        return null;
     }
 
 }

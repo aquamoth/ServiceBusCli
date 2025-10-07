@@ -11,6 +11,7 @@ public sealed partial class BrowserApp
     private void RenderMessagesTable(IReadOnlyList<MessageRow> messages)
     {
         var totalWidth = Console.WindowWidth;
+        Console.WriteLine(new string('-', totalWidth));
         bool showSubject = messages.Any(m => !string.IsNullOrEmpty(m.Subject));
         bool showSession = messages.Any(m => !string.IsNullOrEmpty(m.SessionId));
         var (seqW, enqW, idW, sessW, subjW, previewW) = ComputeMessageColumnWidths(messages, totalWidth, showSubject, showSession);
@@ -33,6 +34,7 @@ public sealed partial class BrowserApp
         Console.Write(" ");
         ColorConsole.Write("Preview".PadRight(previewW), _theme.Control);
         Console.WriteLine();
+        Console.WriteLine(new string('-', totalWidth));
 
         for (int i = 0; i < messages.Count; i++)
         {

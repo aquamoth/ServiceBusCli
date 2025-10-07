@@ -46,11 +46,13 @@ public sealed partial class BrowserApp
             // everything fits; leave whitespace to right
         }
 
+        Console.WriteLine(new string('-', Console.WindowWidth));
         ColorConsole.Write(Align("#", idxW, false), _theme.Control); Console.Write(" ");
         ColorConsole.Write(Align("Namespace", nameW, false), _theme.Control); Console.Write(" ");
         ColorConsole.Write(Align("ResourceGroup", rgW, false), _theme.Control); Console.Write(" ");
         ColorConsole.Write(Align("Sub", subW, false), _theme.Control);
         Console.WriteLine();
+        Console.WriteLine(new string('-', Console.WindowWidth));
 
         for (int i = 0; i < slice.Count; i++)
         {
@@ -97,6 +99,7 @@ public sealed partial class BrowserApp
             // everything fits; leave whitespace to right
         }
 
+        Console.WriteLine(new string('-', Console.WindowWidth));
         ColorConsole.Write(Align("#", idxW, false), _theme.Control); Console.Write(" ");
         ColorConsole.Write(Align("Kind", kindW, false), _theme.Control); Console.Write(" ");
         ColorConsole.Write(Align("Path", pathW, false), _theme.Control); Console.Write(" ");
@@ -105,6 +108,7 @@ public sealed partial class BrowserApp
         ColorConsole.Write(Align("Active", numW, true), _theme.Control); Console.Write(" ");
         ColorConsole.Write(Align("DLQ", numW, true), _theme.Control);
         Console.WriteLine();
+        Console.WriteLine(new string('-', Console.WindowWidth));
 
         for (int i = 0; i < slice.Count; i++)
         {
