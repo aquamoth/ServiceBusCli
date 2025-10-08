@@ -92,9 +92,13 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
         }
         finally
         {
-            try { receiver?.Close(); } catch { }
-            try { session.Close(); } catch { }
-            try { conn.Close(); } catch { }
+            // Offload close handshake to background to avoid blocking the caller.
+            _ = Task.Run(() =>
+            {
+                try { receiver?.Close(); } catch { }
+                try { session.Close(); } catch { }
+                try { conn.Close(); } catch { }
+            });
         }
     }
 
