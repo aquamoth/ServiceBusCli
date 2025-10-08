@@ -595,6 +595,74 @@ public sealed partial class BrowserApp
                     }
                     needsRender = true;
                 }
+                else if (view == View.Messages && cmd.Kind == CommandKind.Delete && cmd.Index is > 0)
+                {
+                    // Delete (complete) a specific message from DLQ
+                    if (_messageMode != MessageMode.DeadLetter)
+                    {
+                        status = "Delete works only in DLQ.";
+                        needsRender = true;
+                        continue;
+                    }
+                    var seq = cmd.Index!.Value;
+                    var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                    if (targetRow is null)
+                    {
+                        status = "Sequence not in current page; not deleting.";
+                        needsRender = true;
+                        continue;
+                    }
+                    try
+                    {
+                        var qe = (QueueEntity)selectedEntity!;
+                        if (sessionEnabled == true && !string.IsNullOrEmpty(targetRow.SessionId))
+                        {
+                            string? cs = _amqpConnectionString;
+                            if (!string.IsNullOrWhiteSpace(cs))
+                            {
+                                var amqp = new AmqpDlqClient();
+                                int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.Ordinal))
+                                    .TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                Logger.Info("AMQP DLQ delete attempt host=" + selectedNs!.FullyQualifiedNamespace + " queue=" + qe.QueueName + " session=" + targetRow.SessionId + " seq=" + seq);
+                                var a0 = DateTime.UtcNow;
+                                bool ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, takeWithinSession, cs, ct);
+                                Logger.Info("AMQP DLQ delete result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
+                                status = ok ? $"Deleted DLQ message {seq} in session {targetRow.SessionId}." : $"Delete failed (AMQP path).";
+                            }
+                            else
+                            {
+                                status = "Delete requires --connection-string for session DLQ.";
+                            }
+                        }
+                        else
+                        {
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
+                            int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
+                            var deleted = await TryDeleteDlqMessageFromPageAsync(receiver!, seq, take, ct);
+                            status = deleted ? $"Deleted DLQ message {seq}." : $"Delete failed (not found in page).";
+                        }
+
+                        // Refresh DLQ page for non-session; avoid SDK refresh when sessionEnabled
+                        if (sessionEnabled != true)
+                        {
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
+                            var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                            messages.Clear();
+                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                        }
+                    }
+                    catch (Exception ex) when (IsUnauthorized(ex))
+                    {
+                        view = View.Entities;
+                        status = "Unauthorized: require Manage/Receive on DLQ.";
+                    }
+                    catch (Exception ex)
+                    {
+                        status = $"Delete failed: {ex.Message}";
+                        Logger.Error("Delete exception: " + ex);
+                    }
+                    needsRender = true;
+                }
                 needsRender = true;
                 continue;
             }
@@ -661,7 +729,7 @@ public sealed partial class BrowserApp
         return (start, count, page, totalPages, pageSize);
     }
 
-    private async Task<(ServiceBusClient client, ServiceBusReceiver? receiver)> EnsureReceiverAsync(SBNamespace ns, SBEntityId entity, MessageMode mode, ServiceBusClient? client, ServiceBusReceiver? rcv, CancellationToken ct)
+    private Task<(ServiceBusClient client, ServiceBusReceiver? receiver)> EnsureReceiverAsync(SBNamespace ns, SBEntityId entity, MessageMode mode, ServiceBusClient? client, ServiceBusReceiver? rcv, CancellationToken ct)
     {
         client ??= new ServiceBusClient(ns.FullyQualifiedNamespace, _credential);
         ServiceBusReceiver? receiver = rcv;
@@ -687,7 +755,7 @@ public sealed partial class BrowserApp
                 receiver = client.CreateReceiver(s.TopicName, s.SubscriptionName);
             }
         }
-        return (client, receiver);
+        return Task.FromResult((client, receiver));
     }
 
     private int GetMessagePageRequestRows(View view, SBNamespace? ns, SBEntityId? entity)
@@ -877,6 +945,8 @@ public sealed partial class BrowserApp
             if (string.Equals(kv.Key, "DeadLetterErrorDescription", StringComparison.OrdinalIgnoreCase)) continue;
             msg.ApplicationProperties[kv.Key] = kv.Value;
         }
+        // Mark original DLQ sequence for traceability
+        msg.ApplicationProperties["OriginalSequenceNumber"] = m.SequenceNumber;
         return msg;
     }
 
@@ -893,6 +963,7 @@ public sealed partial class BrowserApp
             if (string.Equals(kv.Key, "DeadLetterErrorDescription", StringComparison.OrdinalIgnoreCase)) continue;
             msg.ApplicationProperties[kv.Key] = kv.Value;
         }
+        msg.ApplicationProperties["OriginalSequenceNumber"] = m.SequenceNumber;
         return msg;
     }
 
@@ -946,6 +1017,35 @@ public sealed partial class BrowserApp
             if (target != null)
             {
                 await dlqReceiver.AbandonMessageAsync(target, props, ct);
+                return true;
+            }
+            return false;
+        }
+        finally
+        {
+            foreach (var m in received)
+            {
+                if (m == target) continue;
+                try { await dlqReceiver.AbandonMessageAsync(m, cancellationToken: ct); } catch { }
+            }
+        }
+    }
+
+    private async Task<bool> TryDeleteDlqMessageFromPageAsync(ServiceBusReceiver dlqReceiver, long seq, int toReceive, CancellationToken ct)
+    {
+        if (toReceive <= 0) return false;
+        var received = await dlqReceiver.ReceiveMessagesAsync(toReceive, TimeSpan.FromSeconds(5), ct);
+        if (received == null || received.Count == 0) return false;
+        Azure.Messaging.ServiceBus.ServiceBusReceivedMessage? target = null;
+        foreach (var m in received)
+        {
+            if (m.SequenceNumber == seq) { target = m; break; }
+        }
+        try
+        {
+            if (target != null)
+            {
+                await dlqReceiver.CompleteMessageAsync(target, ct);
                 return true;
             }
             return false;
@@ -1057,7 +1157,7 @@ public sealed partial class BrowserApp
             {
                 View.Namespaces => "PageUp/PageDown, ESC. Type 'open <n>' to select namespace.",
                 View.Entities => "PageUp/PageDown, ESC. Commands: 'queue <n>' or 'dlq <n>'.",
-                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <seq>', 'resubmit <seq>', 'dlq', 'queue'; history Up/Down.",
+                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <seq>', 'resubmit <seq>', 'delete <seq>', 'dlq', 'queue'; history Up/Down.",
                 _ => "PageUp/PageDown, ESC."
             };
             Console.WriteLine(TextTruncation.Truncate(hint, Console.WindowWidth));

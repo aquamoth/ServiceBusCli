@@ -53,6 +53,14 @@ public class ParserTests
         r.Index.Should().Be(99);
     }
 
+    [Fact]
+    public void Parses_delete_command()
+    {
+        var d = CommandParser.Parse("delete 10");
+        d.Kind.Should().Be(CommandKind.Delete);
+        d.Index.Should().Be(10);
+    }
+
     [Theory]
     [InlineData("h")]
     [InlineData("help")]

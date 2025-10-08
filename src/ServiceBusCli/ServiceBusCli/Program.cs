@@ -56,7 +56,6 @@ public class Program
             Console.WriteLine("Logging via Serilog (see appsettings.json). File sink defaults to %USERPROFILE%/.servicebuscli/logs/app-.log");
             var cred = CredentialFactory.Create(auth!, tenant);
             var discovery = new ArmServiceBusDiscovery(cred);
-            string? startupStatus = null; // legacy variable; not used for banner anymore
             string? amqpLine = null;
             try
             {

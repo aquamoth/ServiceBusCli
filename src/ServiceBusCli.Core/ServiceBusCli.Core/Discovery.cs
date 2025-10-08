@@ -74,7 +74,7 @@ public sealed class ArmServiceBusDiscovery(TokenCredential credential) : IServic
         var subId = ns.SubscriptionId;
         var nsId = ServiceBusNamespaceResource.CreateResourceIdentifier(subId, ns.ResourceGroup, ns.Name);
         var nsRes = _arm.GetServiceBusNamespaceResource(nsId);
-        foreach (ServiceBusQueueResource q in nsRes.GetServiceBusQueues())
+        await foreach (ServiceBusQueueResource q in nsRes.GetServiceBusQueues().GetAllAsync(cancellationToken: ct))
         {
             var qName = q.Data?.Name ?? q.Id.Name;
             yield return new QueueEntity(ns, qName);
@@ -86,10 +86,10 @@ public sealed class ArmServiceBusDiscovery(TokenCredential credential) : IServic
         var subId = ns.SubscriptionId;
         var nsId = ServiceBusNamespaceResource.CreateResourceIdentifier(subId, ns.ResourceGroup, ns.Name);
         var nsRes = _arm.GetServiceBusNamespaceResource(nsId);
-        foreach (ServiceBusTopicResource topic in nsRes.GetServiceBusTopics())
+        await foreach (ServiceBusTopicResource topic in nsRes.GetServiceBusTopics().GetAllAsync(cancellationToken: ct))
         {
             var topicName = topic.Data?.Name ?? topic.Id.Name;
-            foreach (ServiceBusSubscriptionResource s in topic.GetServiceBusSubscriptions())
+            await foreach (ServiceBusSubscriptionResource s in topic.GetServiceBusSubscriptions().GetAllAsync(cancellationToken: ct))
             {
                 var subName = s.Data?.Name ?? s.Id.Name;
                 yield return new SubscriptionEntity(ns, topicName, subName);
