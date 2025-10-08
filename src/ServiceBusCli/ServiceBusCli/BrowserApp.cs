@@ -20,8 +20,10 @@ public sealed partial class BrowserApp
     private readonly string? _topicArg;
     private readonly string? _tSubArg;
 
+    private readonly string? _amqpConnectionString;
+
     public BrowserApp(TokenCredential credential, IServiceBusDiscovery discovery, Theme theme,
-        string? azureSubscriptionId = null, string? nsArg = null, string? queueArg = null, string? topicArg = null, string? topicSubscriptionArg = null)
+        string? azureSubscriptionId = null, string? nsArg = null, string? queueArg = null, string? topicArg = null, string? topicSubscriptionArg = null, string? startupStatus = null, string? amqpConnectionString = null)
     {
         _credential = credential;
         _discovery = discovery;
@@ -31,6 +33,9 @@ public sealed partial class BrowserApp
         _queueArg = queueArg;
         _topicArg = topicArg;
         _tSubArg = topicSubscriptionArg;
+        _amqpConnectionString = string.IsNullOrWhiteSpace(amqpConnectionString)
+            ? Environment.GetEnvironmentVariable("SERVICEBUS_CONNECTION_STRING")
+            : amqpConnectionString;
     }
 
     private enum View { Namespaces, Entities, Messages }
@@ -300,6 +305,7 @@ public sealed partial class BrowserApp
                     var m = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
                     try
                     {
+                        Logger.Info("Resubmit start seq=" + seq + " entity=" + (selectedEntity is QueueEntity qent ? qent.QueueName : "(not queue)") + " mode=" + _messageMode + " sessionEnabled=" + sessionEnabled);
                         if (m is null)
                         {
                             // Jump to a page that should include seq
@@ -387,6 +393,7 @@ public sealed partial class BrowserApp
                     }
                     try
                     {
+                        Logger.Info("Resubmit start seq=" + seq + " entity=" + (selectedEntity is QueueEntity qent ? qent.QueueName : "(not queue)") + " mode=" + _messageMode + " sessionEnabled=" + sessionEnabled);
                         // Prepare app properties describing the rejection and who performed it
                         var who = await GetSignedInIdentityAsync(ct);
                         var props = new Dictionary<string, object>
@@ -521,6 +528,7 @@ public sealed partial class BrowserApp
                     }
                     try
                     {
+                        Logger.Info("Resubmit start seq=" + seq + " entity=" + (selectedEntity is QueueEntity qent ? qent.QueueName : "(not queue)") + " mode=" + _messageMode + " sessionEnabled=" + sessionEnabled);
                         var qe = (QueueEntity)selectedEntity!;
                         var sender = messageClient?.CreateSender(qe.QueueName) ?? new ServiceBusClient(selectedNs!.FullyQualifiedNamespace, _credential).CreateSender(qe.QueueName);
                         // Create clone payload from current page (no extra server calls)
@@ -528,20 +536,23 @@ public sealed partial class BrowserApp
                         await sender.SendMessageAsync(clone, ct);
                         if (sessionEnabled == true)
                         {
-                            string? cs = Environment.GetEnvironmentVariable("SERVICEBUS_CONNECTION_STRING");
+                            string? cs = _amqpConnectionString;
                             if (!string.IsNullOrWhiteSpace(cs) && !string.IsNullOrEmpty(targetRow.SessionId))
                             {
                                 var amqp = new AmqpDlqClient();
                                 int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.Ordinal))
                                     .TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                Logger.Info("AMQP DLQ completion attempt host=" + selectedNs!.FullyQualifiedNamespace + " queue=" + qe.QueueName + " session=" + targetRow.SessionId + " seq=" + seq);
+                                var a0 = DateTime.UtcNow;
                                 bool ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, takeWithinSession, cs, ct);
+                                Logger.Info("AMQP DLQ completion result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
                                 status = ok
                                     ? $"Resubmitted sequence {seq} and completed DLQ copy in session {targetRow.SessionId}."
                                     : $"Resubmitted sequence {seq}. Could not complete DLQ copy (AMQP experimental path failed).";
                             }
                             else
                             {
-                                status = $"Resubmitted sequence {seq} from DLQ session {targetRow.SessionId}. (Set SERVICEBUS_CONNECTION_STRING to enable AMQP DLQ completion)";
+                                status = $"Resubmitted sequence {seq} from DLQ session {targetRow.SessionId}. (Provide --connection-string or set SERVICEBUS_CONNECTION_STRING to enable AMQP DLQ completion)";
                             }
                         }
                         else
@@ -559,10 +570,18 @@ public sealed partial class BrowserApp
                             status = tagged ? $"Resubmitted sequence {seq} from DLQ and tagged DLQ copy." : $"Resubmitted sequence {seq} from DLQ. (Could not tag DLQ copy)";
                         }
                         // Refresh the DLQ page after operation
-                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
-                        var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
-                        messages.Clear();
-                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                        if (sessionEnabled == true)
+                        {
+                            // For session-enabled DLQ, avoid SDK refresh which may attempt sub-queue session ops and hang.
+                            // Leave the current page as-is and let the user navigate to refresh.
+                        }
+                        else
+                        {
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
+                            var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                            messages.Clear();
+                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                        }
                     }
                     catch (Exception ex) when (IsUnauthorized(ex))
                     {
@@ -572,6 +591,7 @@ public sealed partial class BrowserApp
                     catch (Exception ex)
                     {
                         status = $"Resubmit failed: {ex.Message}";
+                        Logger.Error("Resubmit exception: " + ex);
                     }
                     needsRender = true;
                 }

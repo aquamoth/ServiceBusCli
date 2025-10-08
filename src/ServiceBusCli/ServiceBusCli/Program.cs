@@ -1,5 +1,7 @@
 using System.CommandLine;
 using ServiceBusCli.Core;
+using Microsoft.Extensions.Configuration;
+using Serilog;
 using System.CommandLine.Invocation;
 
 namespace ServiceBusCli;
@@ -15,12 +17,13 @@ public class Program
         var topicSubOption = new Option<string?>("--topic-subscription", description: "Topic subscription name");
         var authOption = new Option<string>("--auth", () => "auto", "Auth mode: auto|device|browser|cli|vscode");
         var tenantOption = new Option<string?>("--tenant", description: "Entra tenant id");
+        var connStrOption = new Option<string?>("--connection-string", description: "Service Bus connection string (SAS) for AMQP features");
         var themeOption = new Option<string>("--theme", () => "default", "Theme: default|mono|no-color|solarized");
         var noColor = new Option<bool>("--no-color", description: "Disable color output");
 
         var root = new RootCommand("Azure Service Bus CLI (preview)")
         {
-            nsOption, azureSubOption, queueOption, topicOption, topicSubOption, authOption, tenantOption, themeOption, noColor
+            nsOption, azureSubOption, queueOption, topicOption, topicSubOption, authOption, tenantOption, themeOption, noColor, connStrOption
         };
 
         root.SetHandler(async (InvocationContext ctx) =>
@@ -35,14 +38,48 @@ public class Program
             var tenant = parse.GetValueForOption(tenantOption);
             var theme = parse.GetValueForOption(themeOption);
             var disableColor = parse.GetValueForOption(noColor);
+            var amqpConnStr = parse.GetValueForOption(connStrOption);
+
+            var config = new ConfigurationBuilder()
+                .SetBasePath(AppContext.BaseDirectory)
+                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+                .Build();
+            Log.Logger = new LoggerConfiguration()
+                .ReadFrom.Configuration(config)
+                .CreateLogger();
 
             var themeResolved = ThemePresets.Resolve(theme, disableColor);
+            var logPath = Logger.Initialize();
             try { Console.Title = "ServiceBusCli"; } catch { /* ignored in some terminals */ }
             Console.WriteLine($"ServiceBusCli — theme: {themeResolved.Name}");
             Console.WriteLine($"Auth: {auth} Tenant: {tenant ?? "(default)"}");
+            Console.WriteLine("Logging via Serilog (see appsettings.json). File sink defaults to %USERPROFILE%/.servicebuscli/logs/app-.log");
             var cred = CredentialFactory.Create(auth!, tenant);
             var discovery = new ArmServiceBusDiscovery(cred);
-            var app = new BrowserApp(cred, discovery, themeResolved, azSub, ns, q, t, tSub);
+            string? startupStatus = null; // legacy variable; not used for banner anymore
+            string? amqpLine = null;
+            try
+            {
+                var cs = string.IsNullOrWhiteSpace(amqpConnStr)
+                    ? Environment.GetEnvironmentVariable("SERVICEBUS_CONNECTION_STRING")
+                    : amqpConnStr;
+                if (!string.IsNullOrWhiteSpace(cs))
+                {
+                    var (ok, msg, host, policy) = await ServiceBusCli.Amqp.AmqpVerifier.TryVerifySasConnectionAsync(cs, 3000, ctx.GetCancellationToken());
+                    amqpLine = ok ? $"AMQP: ready ({host} as {policy})" : $"AMQP: {msg}";
+                }
+                else
+                {
+                    amqpLine = null; // keep output clean if not set
+                }
+            }
+            catch (Exception ex)
+            {
+                amqpLine = $"AMQP: check failed: {ex.Message}";
+            }
+            if (!string.IsNullOrWhiteSpace(amqpLine)) Console.WriteLine(amqpLine);
+            if (!string.IsNullOrWhiteSpace(amqpLine)) Logger.Info(amqpLine);
+            var app = new BrowserApp(cred, discovery, themeResolved, azSub, ns, q, t, tSub, null, amqpConnStr);
             await app.RunAsync();
         });
 

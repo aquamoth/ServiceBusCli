@@ -76,6 +76,7 @@ Commands (initial):
   - Queues only; page-only (message must be on the current page); sessions supported using the session from the page.
 - `resubmit <seq>`: From a queue’s DLQ view, clone the message back into the main queue and remove it from DLQ
   - Page-only: the sequence must be on the current page; sessions supported using the session from the page.
+  - For session DLQ completion, provide AMQP SAS via `--connection-string` (or env `SERVICEBUS_CONNECTION_STRING`). The app will attempt to complete the DLQ copy via AMQP; otherwise it still resubmits the message.
 - `dlq` / `queue` (in Messages): Toggle between viewing a queue and its DLQ
 - `help | h | ?`: Show commands and usage
 - `quit | q | exit`: Quit
