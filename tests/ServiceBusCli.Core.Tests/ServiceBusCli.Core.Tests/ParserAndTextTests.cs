@@ -21,6 +21,22 @@ public class ParserTests
         CommandParser.Parse("exit").Kind.Should().Be(CommandKind.Quit);
     }
 
+    [Fact]
+    public void Parses_queue_and_dlq_commands()
+    {
+        var q = CommandParser.Parse("queue 12");
+        q.Kind.Should().Be(CommandKind.Queue);
+        q.Index.Should().Be(12);
+
+        var d = CommandParser.Parse("dlq 7");
+        d.Kind.Should().Be(CommandKind.Dlq);
+        d.Index.Should().Be(7);
+
+        // Bare toggles without index
+        CommandParser.Parse("dlq").Kind.Should().Be(CommandKind.Dlq);
+        CommandParser.Parse("queue").Kind.Should().Be(CommandKind.Queue);
+    }
+
     [Theory]
     [InlineData("h")]
     [InlineData("help")]

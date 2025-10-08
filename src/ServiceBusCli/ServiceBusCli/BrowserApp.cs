@@ -11,6 +11,7 @@ public sealed partial class BrowserApp
     private readonly Theme _theme;
     private long? _activeMessageCount; // runtime ActiveMessageCount for current entity
     private int _msgPage = 1; // messages view page index (1-based)
+    private MessageMode _messageMode = MessageMode.Normal; // normal vs DLQ
 
     private readonly string? _azureSubscriptionId;
     private readonly string? _nsArg;
@@ -32,6 +33,7 @@ public sealed partial class BrowserApp
     }
 
     private enum View { Namespaces, Entities, Messages }
+    private enum MessageMode { Normal, DeadLetter }
     private sealed record ViewState(View View, SBNamespace? Namespace, SBEntityId? Entity, int NsPage, int EntPage);
 
     // moved to its own file for reuse in helpers/tests
@@ -155,10 +157,10 @@ public sealed partial class BrowserApp
                         nextFromSequence = messages.Last().SequenceNumber + 1;
                             try
                             {
-                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
-                                messages.Clear();
-                                var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
-                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, _messageMode, messageClient, receiver, ct);
+                            messages.Clear();
+                            var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
                                 _msgPage++;
                                 // Do not refresh active count on every page to keep paging snappy
                             }
@@ -184,7 +186,7 @@ public sealed partial class BrowserApp
                     }
                     else if (messages.Count > 0)
                     {
-                        var pageSize = Math.Max(1, Console.WindowHeight - 6);
+                        var pageSize = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
                         var firstSeq = messages.First().SequenceNumber;
                         var prevStart = firstSeq > pageSize ? firstSeq - pageSize : 1;
                         nextFromSequence = prevStart;
@@ -195,7 +197,7 @@ public sealed partial class BrowserApp
                     }
                     try
                     {
-                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, _messageMode, messageClient, receiver, ct);
                         messages.Clear();
                         var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
                         messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
@@ -224,7 +226,7 @@ public sealed partial class BrowserApp
                     historyNav.ResetToBottom();
                 }
                 if (cmd.Kind == CommandKind.Quit) break;
-                if (view != View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
+                if (view != View.Messages && cmd.Index is > 0 && (cmd.Kind == CommandKind.Open || cmd.Kind == CommandKind.Queue || cmd.Kind == CommandKind.Dlq))
                 {
                     if (cmd.Index is null || cmd.Index.Value > int.MaxValue) { continue; }
                     var index = (int)cmd.Index.Value - 1; // global index (1-based display)
@@ -248,6 +250,13 @@ public sealed partial class BrowserApp
                         if (idx >= 0 && idx < entities.Count)
                         {
                             var e = entities[idx];
+                            bool openDlq = cmd.Kind == CommandKind.Dlq;
+                            if (openDlq && e.Kind != EntityKind.Queue)
+                            {
+                                status = "DLQ is only available for queues.";
+                                needsRender = true;
+                                continue;
+                            }
                             viewStack.Push(new ViewState(view, selectedNs, selectedEntity, _nsPage, _entPage));
                             selectedEntity = e.Kind == EntityKind.Queue
                                 ? new QueueEntity(selectedNs!, e.Path)
@@ -256,6 +265,7 @@ public sealed partial class BrowserApp
                             pageHistory.Clear();
                             nextFromSequence = 1;
                             _msgPage = 1;
+                            _messageMode = openDlq ? MessageMode.DeadLetter : MessageMode.Normal;
                             if (receiver != null) { await receiver.CloseAsync(); receiver = null; }
                             if (messageClient != null) { await messageClient.DisposeAsync(); messageClient = null; }
                             try
@@ -265,7 +275,7 @@ public sealed partial class BrowserApp
                             catch { sessionEnabled = null; }
                             try
                             {
-                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, _messageMode, messageClient, receiver, ct);
                                 messages.Clear();
                                 var req3 = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
                                 messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req3, ct));
@@ -292,7 +302,7 @@ public sealed partial class BrowserApp
                         if (m is null)
                         {
                             // Jump to a page that should include seq
-                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, messageClient, receiver, ct);
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, _messageMode, messageClient, receiver, ct);
                             var requested = Math.Max(1, Console.WindowHeight - 6);
                             var startSeq = seq > requested ? seq - requested + 1 : seq; // try to center seq on page if possible
                             pageHistory.Push(nextFromSequence);
@@ -350,6 +360,47 @@ public sealed partial class BrowserApp
                     {
                         status = $"Open failed: {ex.Message}";
                     }
+                }
+                else if (view == View.Messages && (cmd.Kind == CommandKind.Dlq || cmd.Kind == CommandKind.Queue))
+                {
+                    // Toggle between normal queue and Dead-Letter Queue for queues
+                    try
+                    {
+                        if (selectedEntity is not QueueEntity)
+                        {
+                            status = cmd.Kind == CommandKind.Dlq
+                                ? "DLQ is only available for queues."
+                                : "Already in normal mode (subscriptions do not support 'queue'/'dlq' toggles).";
+                            needsRender = true;
+                            continue;
+                        }
+                        var targetMode = cmd.Kind == CommandKind.Dlq ? MessageMode.DeadLetter : MessageMode.Normal;
+                        if (_messageMode == targetMode)
+                        {
+                            needsRender = true;
+                            continue;
+                        }
+                        _messageMode = targetMode;
+                        pageHistory.Clear();
+                        nextFromSequence = 1;
+                        _msgPage = 1;
+                        if (receiver != null) { await receiver.CloseAsync(); receiver = null; }
+                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, _messageMode, messageClient, receiver, ct);
+                        messages.Clear();
+                        var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                    }
+                    catch (Exception ex) when (IsUnauthorized(ex))
+                    {
+                        view = View.Entities;
+                        status = "Unauthorized: require Azure Service Bus Data Receiver (Listen) on entity.";
+                    }
+                    catch (Exception ex)
+                    {
+                        status = $"Switch failed: {ex.Message}";
+                    }
+                    needsRender = true;
+                    continue;
                 }
                 needsRender = true;
                 continue;
@@ -417,15 +468,32 @@ public sealed partial class BrowserApp
         return (start, count, page, totalPages, pageSize);
     }
 
-    private async Task<(ServiceBusClient client, ServiceBusReceiver? receiver)> EnsureReceiverAsync(SBNamespace ns, SBEntityId entity, ServiceBusClient? client, ServiceBusReceiver? rcv, CancellationToken ct)
+    private async Task<(ServiceBusClient client, ServiceBusReceiver? receiver)> EnsureReceiverAsync(SBNamespace ns, SBEntityId entity, MessageMode mode, ServiceBusClient? client, ServiceBusReceiver? rcv, CancellationToken ct)
     {
         client ??= new ServiceBusClient(ns.FullyQualifiedNamespace, _credential);
-        var receiver = entity switch
+        ServiceBusReceiver? receiver = rcv;
+        if (entity is QueueEntity q)
         {
-            QueueEntity q => rcv != null && rcv.EntityPath == q.Path ? rcv : client.CreateReceiver(q.Path),
-            SubscriptionEntity s => rcv != null && rcv.EntityPath == s.Path ? rcv : client.CreateReceiver(s.TopicName, s.SubscriptionName),
-            _ => rcv
-        };
+            if (receiver == null || receiver.EntityPath != q.Path)
+            {
+                if (mode == MessageMode.DeadLetter)
+                {
+                    var opts = new ServiceBusReceiverOptions { SubQueue = SubQueue.DeadLetter };
+                    receiver = client.CreateReceiver(q.QueueName, opts);
+                }
+                else
+                {
+                    receiver = client.CreateReceiver(q.QueueName);
+                }
+            }
+        }
+        else if (entity is SubscriptionEntity s)
+        {
+            if (receiver == null || receiver.EntityPath != s.Path)
+            {
+                receiver = client.CreateReceiver(s.TopicName, s.SubscriptionName);
+            }
+        }
         return (client, receiver);
     }
 
@@ -433,7 +501,8 @@ public sealed partial class BrowserApp
     {
         int width = Console.WindowWidth;
         int ctx = RenderContextLinesForMeasure(view, ns, entity, width);
-        return Math.Max(1, Console.WindowHeight - 6 - ctx);
+        // Reserve: title (1) + context (ctx) + header dashes+row (3) + footer (2) + safety (1)
+        return Math.Max(1, Console.WindowHeight - (6 + 1) - ctx);
     }
 
     private int RenderContextLinesForMeasure(View view, SBNamespace? ns, SBEntityId? entity, int width)
@@ -556,7 +625,14 @@ public sealed partial class BrowserApp
         }
         else
         {
-            Console.WriteLine("Use PageUp/PageDown, ESC to go back. Up/Down navigate command history. Type a number to select, or commands like 'open 5', 'quit', 'help'.");
+            string hint = view switch
+            {
+                View.Namespaces => "PageUp/PageDown, ESC. Type 'open <n>' to select namespace.",
+                View.Entities => "PageUp/PageDown, ESC. Commands: 'queue <n>' or 'dlq <n>'.",
+                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'dlq', 'queue'; history Up/Down.",
+                _ => "PageUp/PageDown, ESC."
+            };
+            Console.WriteLine(TextTruncation.Truncate(hint, Console.WindowWidth));
         }
         Console.SetCursorPosition(0, Console.WindowHeight - 1);
         var prompt = "Command (h for help)> ";
@@ -590,6 +666,10 @@ public sealed partial class BrowserApp
         for (int i = 0; i < segments.Count; i++)
         {
             var (label, value) = segments[i];
+            if (label.StartsWith("Queue:") && _messageMode == MessageMode.DeadLetter)
+            {
+                value = value + " (DLQ)";
+            }
             int needed = (col > 0 ? 2 : 0) + label.Length + 1 + value.Length; // gap + label + space + value
             if (needed > Math.Max(1, width - col))
             {
