@@ -2,10 +2,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\ServiceBusCli.Core\ServiceBusCli.Core\ServiceBusCli.Core.csproj" />
+    <ProjectReference Include="..\..\ServiceBusCli.Amqp\ServiceBusCli.Amqp\ServiceBusCli.Amqp.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Azure.Identity" Version="1.*" />
+    <PackageReference Include="Azure.Identity" Version="1.17.0" />
     <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.*" />
     <PackageReference Include="Azure.ResourceManager" Version="1.*" />
     <PackageReference Include="Azure.ResourceManager.ServiceBus" Version="1.*" />

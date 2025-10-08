@@ -67,6 +67,15 @@ Recent Changes (2025-10-06)
 - Navigation: ESC goes back using a generic view stack (Namespaces ← Entities ← Messages), restoring paging and selection state.
 - Stability: When switching namespaces/entities, receivers/clients are reset to avoid cross-namespace reuse (fixes 404/$management on prior namespace).
 
+AMQP Integration (Planned)
+- Add `ServiceBusCli.Amqp` project to encapsulate raw AMQP operations where SDK is missing features (e.g., DLQ session completion).
+- Initial target: DLQ session resubmit/complete path
+  - Use CBS auth via `SERVICEBUS_CONNECTION_STRING` (SAS) to keep the first cut simple.
+  - Open receiver to `sb://<ns>/<queue>/$DeadLetterQueue` with `com.microsoft:session-filter`.
+  - Bounded receive (page-only) up to the target; complete the target, abandon others.
+- Optional (future): AAD token via CBS using the app credential.
+- Fallback behavior when AMQP is unavailable/failing: always resubmit (clone/send) and tag DLQ copy (non-session via SDK; for session, tag when AMQP path succeeds, otherwise leave a clear status).
+
 Unit Tests
 - SelectionHelper ensures selection respects sorted order.
   - Namespaces: `alpha`, `beta`, `gamma` returned for 1..3.
@@ -126,6 +135,7 @@ Permissions & Environment
 - ARM discovery: Reader access (or higher) on subscription/RG/namespace. Owner on ARM does not confer data-plane rights.
 - Data plane (messages): requires `Azure Service Bus Data Receiver` (Listen) at namespace or entity scope; `Data Owner` grants Manage+Send+Listen.
 - Environment variables: `AZURE_TENANT_ID` (tenant), and future `SERVICEBUS_CONNECTION_STRING` for SAS fallback (see Next Steps).
+  - `SERVICEBUS_CONNECTION_STRING`: Enables AMQP DLQ session operations (CBS SAS) and may be needed for experimental features.
 
 Risks & Mitigations
 - Large namespaces/entities: cap list and page sizes; lazy-load; add per-page timeouts.

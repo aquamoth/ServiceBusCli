@@ -45,6 +45,14 @@ public class ParserTests
         r.Index.Should().Be(42);
     }
 
+    [Fact]
+    public void Parses_resubmit_command()
+    {
+        var r = CommandParser.Parse("resubmit 99");
+        r.Kind.Should().Be(CommandKind.Resubmit);
+        r.Index.Should().Be(99);
+    }
+
     [Theory]
     [InlineData("h")]
     [InlineData("help")]

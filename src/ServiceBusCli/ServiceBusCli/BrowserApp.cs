@@ -1,6 +1,7 @@
 using Azure.Core;
 using Azure.Messaging.ServiceBus;
 using ServiceBusCli.Core;
+using ServiceBusCli.Amqp;
 
 namespace ServiceBusCli;
 
@@ -495,6 +496,85 @@ public sealed partial class BrowserApp
                     needsRender = true;
                     continue;
                 }
+                else if (view == View.Messages && cmd.Kind == CommandKind.Resubmit && cmd.Index is > 0)
+                {
+                    // Resubmit a DLQ message back to the active queue (clone and send)
+                    if (selectedEntity is not QueueEntity)
+                    {
+                        status = "Resubmit is only supported for queues.";
+                        needsRender = true;
+                        continue;
+                    }
+                    if (_messageMode != MessageMode.DeadLetter)
+                    {
+                        status = "Resubmit works only when viewing DLQ.";
+                        needsRender = true;
+                        continue;
+                    }
+                    var seq = cmd.Index!.Value;
+                    var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                    if (targetRow is null)
+                    {
+                        status = "Sequence not in current page; not resubmitting.";
+                        needsRender = true;
+                        continue;
+                    }
+                    try
+                    {
+                        var qe = (QueueEntity)selectedEntity!;
+                        var sender = messageClient?.CreateSender(qe.QueueName) ?? new ServiceBusClient(selectedNs!.FullyQualifiedNamespace, _credential).CreateSender(qe.QueueName);
+                        // Create clone payload from current page (no extra server calls)
+                        var clone = CloneForResubmit(targetRow);
+                        await sender.SendMessageAsync(clone, ct);
+                        if (sessionEnabled == true)
+                        {
+                            string? cs = Environment.GetEnvironmentVariable("SERVICEBUS_CONNECTION_STRING");
+                            if (!string.IsNullOrWhiteSpace(cs) && !string.IsNullOrEmpty(targetRow.SessionId))
+                            {
+                                var amqp = new AmqpDlqClient();
+                                int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.Ordinal))
+                                    .TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                bool ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, takeWithinSession, cs, ct);
+                                status = ok
+                                    ? $"Resubmitted sequence {seq} and completed DLQ copy in session {targetRow.SessionId}."
+                                    : $"Resubmitted sequence {seq}. Could not complete DLQ copy (AMQP experimental path failed).";
+                            }
+                            else
+                            {
+                                status = $"Resubmitted sequence {seq} from DLQ session {targetRow.SessionId}. (Set SERVICEBUS_CONNECTION_STRING to enable AMQP DLQ completion)";
+                            }
+                        }
+                        else
+                        {
+                            // Tag DLQ copy as resubmitted by abandoning with properties
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
+                            int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
+                            var who = await GetSignedInIdentityAsync(ct);
+                            var props = new Dictionary<string, object>
+                            {
+                                ["ResubmittedBy"] = who,
+                                ["ResubmittedAt"] = DateTimeOffset.UtcNow.ToString("u")
+                            };
+                            var tagged = await TryTagDlqMessageFromPageAsync(receiver!, seq, take, props, ct);
+                            status = tagged ? $"Resubmitted sequence {seq} from DLQ and tagged DLQ copy." : $"Resubmitted sequence {seq} from DLQ. (Could not tag DLQ copy)";
+                        }
+                        // Refresh the DLQ page after operation
+                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
+                        var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                        messages.Clear();
+                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                    }
+                    catch (Exception ex) when (IsUnauthorized(ex))
+                    {
+                        view = View.Entities;
+                        status = "Unauthorized: require Send to queue and Receive/Manage on DLQ.";
+                    }
+                    catch (Exception ex)
+                    {
+                        status = $"Resubmit failed: {ex.Message}";
+                    }
+                    needsRender = true;
+                }
                 needsRender = true;
                 continue;
             }
@@ -747,6 +827,121 @@ public sealed partial class BrowserApp
         }
     }
 
+    private static ServiceBusMessage CloneForResubmit(Azure.Messaging.ServiceBus.ServiceBusReceivedMessage m)
+    {
+        var msg = new ServiceBusMessage(m.Body);
+        // Core properties
+        msg.ContentType = m.ContentType;
+        msg.CorrelationId = m.CorrelationId;
+        msg.MessageId = m.MessageId; // may cause duplicates if deduplication enabled; intentional clone
+        msg.Subject = m.Subject;
+        msg.SessionId = m.SessionId;
+        msg.ReplyTo = m.ReplyTo;
+        msg.ReplyToSessionId = m.ReplyToSessionId;
+        msg.To = m.To;
+        msg.PartitionKey = m.PartitionKey;
+        // TTL: attempt to preserve remaining lifetime if available
+        try
+        {
+            var remaining = m.ExpiresAt - DateTimeOffset.UtcNow;
+            if (remaining > TimeSpan.Zero)
+            {
+                msg.TimeToLive = remaining;
+            }
+        }
+        catch { }
+        // Application properties (filter out dead-letter metadata we injected)
+        foreach (var kv in m.ApplicationProperties)
+        {
+            if (string.Equals(kv.Key, "DeadLetterReason", StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.Equals(kv.Key, "DeadLetterErrorDescription", StringComparison.OrdinalIgnoreCase)) continue;
+            msg.ApplicationProperties[kv.Key] = kv.Value;
+        }
+        return msg;
+    }
+
+    private static ServiceBusMessage CloneForResubmit(MessageRow m)
+    {
+        var msg = new ServiceBusMessage(m.Body);
+        msg.ContentType = m.ContentType;
+        msg.MessageId = m.MessageId;
+        msg.Subject = m.Subject;
+        if (!string.IsNullOrEmpty(m.SessionId)) msg.SessionId = m.SessionId;
+        foreach (var kv in m.ApplicationProperties)
+        {
+            if (string.Equals(kv.Key, "DeadLetterReason", StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.Equals(kv.Key, "DeadLetterErrorDescription", StringComparison.OrdinalIgnoreCase)) continue;
+            msg.ApplicationProperties[kv.Key] = kv.Value;
+        }
+        return msg;
+    }
+
+    private async Task<(bool ok, string? error)> TryResubmitBySequenceFromPageAsync(ServiceBusReceiver dlqReceiver, ServiceBusSender sender, long seq, int toReceive, CancellationToken ct)
+    {
+        if (toReceive <= 0) return (false, "Target not in current page.");
+        var received = await dlqReceiver.ReceiveMessagesAsync(toReceive, TimeSpan.FromSeconds(5), ct);
+        if (received == null || received.Count == 0) return (false, "No messages available in DLQ.");
+        Azure.Messaging.ServiceBus.ServiceBusReceivedMessage? target = null;
+        foreach (var m in received)
+        {
+            if (m.SequenceNumber == seq) { target = m; break; }
+        }
+        if (target == null)
+        {
+            foreach (var m in received)
+            {
+                try { await dlqReceiver.AbandonMessageAsync(m, cancellationToken: ct); } catch { }
+            }
+            return (false, null);
+        }
+        try
+        {
+            var clone = CloneForResubmit(target);
+            await sender.SendMessageAsync(clone, ct);
+            await dlqReceiver.CompleteMessageAsync(target, ct);
+        }
+        finally
+        {
+            foreach (var m in received)
+            {
+                if (m == target) continue;
+                try { await dlqReceiver.AbandonMessageAsync(m, cancellationToken: ct); } catch { }
+            }
+        }
+        return (true, null);
+    }
+
+    private async Task<bool> TryTagDlqMessageFromPageAsync(ServiceBusReceiver dlqReceiver, long seq, int toReceive, IDictionary<string, object> props, CancellationToken ct)
+    {
+        if (toReceive <= 0) return false;
+        var received = await dlqReceiver.ReceiveMessagesAsync(toReceive, TimeSpan.FromSeconds(5), ct);
+        if (received == null || received.Count == 0) return false;
+        Azure.Messaging.ServiceBus.ServiceBusReceivedMessage? target = null;
+        foreach (var m in received)
+        {
+            if (m.SequenceNumber == seq) { target = m; break; }
+        }
+        try
+        {
+            if (target != null)
+            {
+                await dlqReceiver.AbandonMessageAsync(target, props, ct);
+                return true;
+            }
+            return false;
+        }
+        finally
+        {
+            foreach (var m in received)
+            {
+                if (m == target) continue;
+                try { await dlqReceiver.AbandonMessageAsync(m, cancellationToken: ct); } catch { }
+            }
+        }
+    }
+
+    // Note: Session DLQ resubmit requires accepting the DLQ session; not supported in this SDK version.
+
     private static string TryPreview(BinaryData body)
     {
         try
@@ -842,7 +1037,7 @@ public sealed partial class BrowserApp
             {
                 View.Namespaces => "PageUp/PageDown, ESC. Type 'open <n>' to select namespace.",
                 View.Entities => "PageUp/PageDown, ESC. Commands: 'queue <n>' or 'dlq <n>'.",
-                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <seq>', 'dlq', 'queue'; history Up/Down.",
+                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <seq>', 'resubmit <seq>', 'dlq', 'queue'; history Up/Down.",
                 _ => "PageUp/PageDown, ESC."
             };
             Console.WriteLine(TextTruncation.Truncate(hint, Console.WindowWidth));

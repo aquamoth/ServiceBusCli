@@ -73,7 +73,9 @@ Commands (initial):
 
 - `open <seq>`: Open a message by sequence number in the external editor
 - `reject <seq>`: Move a message (by sequence) from an active queue to its DLQ
-  - Queues only; not supported for sessions; works when the target is near the queue head.
+  - Queues only; page-only (message must be on the current page); sessions supported using the session from the page.
+- `resubmit <seq>`: From a queue’s DLQ view, clone the message back into the main queue and remove it from DLQ
+  - Page-only: the sequence must be on the current page; sessions supported using the session from the page.
 - `dlq` / `queue` (in Messages): Toggle between viewing a queue and its DLQ
 - `help | h | ?`: Show commands and usage
 - `quit | q | exit`: Quit
