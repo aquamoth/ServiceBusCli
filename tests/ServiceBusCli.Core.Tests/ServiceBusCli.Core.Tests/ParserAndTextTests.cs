@@ -37,6 +37,14 @@ public class ParserTests
         CommandParser.Parse("queue").Kind.Should().Be(CommandKind.Queue);
     }
 
+    [Fact]
+    public void Parses_reject_command()
+    {
+        var r = CommandParser.Parse("reject 42");
+        r.Kind.Should().Be(CommandKind.Reject);
+        r.Index.Should().Be(42);
+    }
+
     [Theory]
     [InlineData("h")]
     [InlineData("help")]

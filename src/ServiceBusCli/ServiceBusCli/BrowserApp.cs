@@ -361,6 +361,99 @@ public sealed partial class BrowserApp
                         status = $"Open failed: {ex.Message}";
                     }
                 }
+                else if (view == View.Messages && cmd.Kind == CommandKind.Reject && cmd.Index is > 0)
+                {
+                    // Move a specific message (by sequence number) from active queue to its DLQ
+                    if (selectedEntity is not QueueEntity)
+                    {
+                        status = "Reject is only supported for queues.";
+                        needsRender = true;
+                        continue;
+                    }
+                    if (_messageMode != MessageMode.Normal)
+                    {
+                        status = "Reject works only in normal queue mode (not DLQ).";
+                        needsRender = true;
+                        continue;
+                    }
+                    var seq = cmd.Index!.Value;
+                    var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                    if (targetRow is null)
+                    {
+                        status = "Sequence not in current page; not rejecting.";
+                        needsRender = true;
+                        continue;
+                    }
+                    try
+                    {
+                        // Prepare app properties describing the rejection and who performed it
+                        var who = await GetSignedInIdentityAsync(ct);
+                        var props = new Dictionary<string, object>
+                        {
+                            ["DeadLetterReason"] = "Rejected by ServiceBusCli",
+                            ["DeadLetterErrorDescription"] = $"Rejected by {who} at {DateTimeOffset.UtcNow:u}"
+                        };
+
+                        if (sessionEnabled == true)
+                        {
+                            // Determine session id for the target from page memory only
+                            string? sid = targetRow.SessionId;
+                            if (string.IsNullOrEmpty(sid))
+                            {
+                                status = $"Cannot determine session for sequence {seq} from page memory.";
+                                needsRender = true;
+                                continue;
+                            }
+                            var qe = (QueueEntity)selectedEntity!;
+                            // Receive up to the position of this message within this session on the current page
+                            int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, sid, StringComparison.Ordinal))
+                                .TakeWhile(m => m.SequenceNumber <= seq).Count();
+                            var (ok, msg) = await TryDeadLetterBySequenceInSessionFromPageAsync(messageClient!, qe.QueueName, sid!, seq, takeWithinSession, props, ct);
+                            if (ok)
+                            {
+                                status = $"Rejected (dead-lettered) sequence {seq} in session {sid}.";
+                                // Refresh without assuming receiver state
+                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.Normal, messageClient, receiver, ct);
+                                var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                                messages.Clear();
+                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                            }
+                            else
+                            {
+                                status = msg ?? $"Sequence {seq} not found near head of session {sid}.";
+                            }
+                        }
+                        else
+                        {
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.Normal, messageClient, receiver, ct);
+                            // Receive up to the position of this message on the current page
+                            int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
+                            var (ok, msg) = await TryDeadLetterBySequenceFromPageAsync(receiver!, seq, take, props, ct);
+                            if (ok)
+                            {
+                                status = $"Rejected (dead-lettered) sequence {seq}.";
+                                // Refresh the current page
+                                var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                                messages.Clear();
+                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                            }
+                            else
+                            {
+                                status = msg ?? $"Sequence {seq} not found at queue head (may have moved).";
+                            }
+                        }
+                    }
+                    catch (Exception ex) when (IsUnauthorized(ex))
+                    {
+                        view = View.Entities;
+                        status = "Unauthorized: require Data Receiver + Manage to dead-letter.";
+                    }
+                    catch (Exception ex)
+                    {
+                        status = $"Reject failed: {ex.Message}";
+                    }
+                    needsRender = true;
+                }
                 else if (view == View.Messages && (cmd.Kind == CommandKind.Dlq || cmd.Kind == CommandKind.Queue))
                 {
                     // Toggle between normal queue and Dead-Letter Queue for queues
@@ -534,6 +627,126 @@ public sealed partial class BrowserApp
         return list;
     }
 
+    private string? _cachedIdentity;
+    private async Task<string> GetSignedInIdentityAsync(CancellationToken ct)
+    {
+        if (!string.IsNullOrEmpty(_cachedIdentity)) return _cachedIdentity!;
+        try
+        {
+            var ctx = new Azure.Core.TokenRequestContext(new[] { "https://servicebus.azure.net/.default" });
+            var token = await _credential.GetTokenAsync(ctx, ct);
+            var parts = token.Token.Split('.');
+            if (parts.Length >= 2)
+            {
+                string Decode(string s)
+                {
+                    s = s.Replace('-', '+').Replace('_', '/');
+                    switch (s.Length % 4)
+                    {
+                        case 2: s += "=="; break;
+                        case 3: s += "="; break;
+                    }
+                    var bytes = Convert.FromBase64String(s);
+                    return System.Text.Encoding.UTF8.GetString(bytes);
+                }
+                var payloadJson = Decode(parts[1]);
+                using var doc = System.Text.Json.JsonDocument.Parse(payloadJson);
+                var root = doc.RootElement;
+                string? name = root.TryGetProperty("name", out var n) ? n.GetString() : null;
+                string? upn = root.TryGetProperty("preferred_username", out var u) ? u.GetString() : (root.TryGetProperty("upn", out var u2) ? u2.GetString() : null);
+                string? oid = root.TryGetProperty("oid", out var o) ? o.GetString() : null;
+                var id = name ?? upn ?? oid ?? "unknown";
+                if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(upn)) id = $"{name} ({upn})";
+                _cachedIdentity = id;
+                return id;
+            }
+        }
+        catch { }
+        _cachedIdentity = Environment.UserName ?? "unknown";
+        return _cachedIdentity;
+    }
+
+    // From current page: receive a bounded batch up to the target's position and dead-letter it.
+    private async Task<(bool ok, string? error)> TryDeadLetterBySequenceFromPageAsync(ServiceBusReceiver rcv, long seq, int toReceive, IDictionary<string, object> props, CancellationToken ct)
+    {
+        if (toReceive <= 0) return (false, "Target not in current page.");
+        var received = await rcv.ReceiveMessagesAsync(toReceive, TimeSpan.FromSeconds(5), ct);
+        if (received == null || received.Count == 0) return (false, "No messages available.");
+
+        Azure.Messaging.ServiceBus.ServiceBusReceivedMessage? target = null;
+        foreach (var m in received)
+        {
+            if (m.SequenceNumber == seq) { target = m; break; }
+        }
+        if (target == null)
+        {
+            foreach (var m in received)
+            {
+                try { await rcv.AbandonMessageAsync(m, cancellationToken: ct); } catch { }
+            }
+            return (false, null);
+        }
+        try
+        {
+            await rcv.DeadLetterMessageAsync(target, propertiesToModify: props, cancellationToken: ct);
+        }
+        finally
+        {
+            foreach (var m in received)
+            {
+                if (m == target) continue;
+                try { await rcv.AbandonMessageAsync(m, cancellationToken: ct); } catch { }
+            }
+        }
+        return (true, null);
+    }
+
+    // Session-enabled variant from current page.
+    private async Task<(bool ok, string? error)> TryDeadLetterBySequenceInSessionFromPageAsync(ServiceBusClient client, string queueName, string sessionId, long seq, int toReceive, IDictionary<string, object> props, CancellationToken ct)
+    {
+        Azure.Messaging.ServiceBus.ServiceBusSessionReceiver? srecv = null;
+        try
+        {
+            srecv = await client.AcceptSessionAsync(queueName, sessionId, cancellationToken: ct);
+            if (toReceive <= 0) return (false, "Target not in current page/session.");
+            var received = await srecv.ReceiveMessagesAsync(toReceive, TimeSpan.FromSeconds(5), ct);
+            if (received == null || received.Count == 0) return (false, "No messages available in session.");
+            Azure.Messaging.ServiceBus.ServiceBusReceivedMessage? target = null;
+            foreach (var m in received)
+            {
+                if (m.SequenceNumber == seq) { target = m; break; }
+            }
+            if (target == null)
+            {
+                foreach (var m in received)
+                {
+                    try { await srecv.AbandonMessageAsync(m, cancellationToken: ct); } catch { }
+                }
+                return (false, null);
+            }
+            try
+            {
+                await srecv.DeadLetterMessageAsync(target, propertiesToModify: props, cancellationToken: ct);
+            }
+            finally
+            {
+                foreach (var m in received)
+                {
+                    if (m == target) continue;
+                    try { await srecv.AbandonMessageAsync(m, cancellationToken: ct); } catch { }
+                }
+            }
+            return (true, null);
+        }
+        finally
+        {
+            if (srecv != null)
+            {
+                try { await srecv.CloseAsync(ct); } catch { }
+            }
+        }
+    }
+
     private static string TryPreview(BinaryData body)
     {
         try
@@ -629,7 +842,7 @@ public sealed partial class BrowserApp
             {
                 View.Namespaces => "PageUp/PageDown, ESC. Type 'open <n>' to select namespace.",
                 View.Entities => "PageUp/PageDown, ESC. Commands: 'queue <n>' or 'dlq <n>'.",
-                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'dlq', 'queue'; history Up/Down.",
+                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <seq>', 'dlq', 'queue'; history Up/Down.",
                 _ => "PageUp/PageDown, ESC."
             };
             Console.WriteLine(TextTruncation.Truncate(hint, Console.WindowWidth));

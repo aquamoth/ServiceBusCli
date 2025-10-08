@@ -72,6 +72,9 @@ Keyboard actions:
 Commands (initial):
 
 - `open <seq>`: Open a message by sequence number in the external editor
+- `reject <seq>`: Move a message (by sequence) from an active queue to its DLQ
+  - Queues only; not supported for sessions; works when the target is near the queue head.
+- `dlq` / `queue` (in Messages): Toggle between viewing a queue and its DLQ
 - `help | h | ?`: Show commands and usage
 - `quit | q | exit`: Quit
 
@@ -104,4 +107,3 @@ External editor resolution: `$VISUAL` → `$EDITOR` → OS default (`xdg-open` o
 ## Contributing
 
 Issues and PRs are welcome. Please open an issue to discuss larger changes.
-

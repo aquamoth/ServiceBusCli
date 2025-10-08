@@ -9,7 +9,8 @@ public enum CommandKind
     Quit,
     Open,
     Queue,
-    Dlq
+    Dlq,
+    Reject
 }
 
 public sealed record ParsedCommand(CommandKind Kind, long? Index = null, string? Raw = null);
@@ -19,6 +20,7 @@ public static class CommandParser
     private static readonly Regex OpenRe = new("^open\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex QueueRe = new("^queue\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex DlqRe = new("^dlq\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex RejectRe = new("^reject\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static ParsedCommand Parse(string? input)
     {
@@ -43,6 +45,9 @@ public static class CommandParser
         m = DlqRe.Match(text);
         if (m.Success && long.TryParse(m.Groups["n"].Value, out var dn))
             return new ParsedCommand(CommandKind.Dlq, Index: dn, Raw: text);
+        m = RejectRe.Match(text);
+        if (m.Success && long.TryParse(m.Groups["n"].Value, out var rj))
+            return new ParsedCommand(CommandKind.Reject, Index: rj, Raw: text);
         return new ParsedCommand(CommandKind.None, Raw: text);
     }
 }
