@@ -638,19 +638,11 @@ public sealed partial class BrowserApp
                             }
                         }
                         status = $"Resubmitted {success} message(s)" + (fail > 0 ? $", {fail} DLQ completions failed" : string.Empty) + ".";
-                        // Refresh the DLQ page after operation
-                        if (sessionEnabled == true)
-                        {
-                            // For session-enabled DLQ, avoid SDK refresh which may attempt sub-queue session ops and hang.
-                            // Leave the current page as-is and let the user navigate to refresh.
-                        }
-                        else
-                        {
-                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
-                            var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
-                            messages.Clear();
-                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
-                        }
+                        // Refresh the DLQ page after operation (both session and non-session)
+                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
+                        var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                        messages.Clear();
+                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
                     }
                     catch (Exception ex) when (IsUnauthorized(ex))
                     {
