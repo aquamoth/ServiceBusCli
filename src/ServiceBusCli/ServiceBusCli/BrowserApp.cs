@@ -618,17 +618,22 @@ public sealed partial class BrowserApp
                             }
                             else
                             {
-                                // Tag DLQ copy as resubmitted by abandoning with properties
+                                // Non-session DLQ: complete the DLQ copy via SDK after sending clone
                                 (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
                                 int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
-                                var who = await GetSignedInIdentityAsync(ct);
-                                var props = new Dictionary<string, object>
+                                var deleted = await TryDeleteDlqMessageFromPageAsync(receiver!, seq, Math.Max(1, take), ct);
+                                if (!deleted)
                                 {
-                                    ["ResubmittedBy"] = who,
-                                    ["ResubmittedAt"] = DateTimeOffset.UtcNow.ToString("u")
-                                };
-                                var tagged = await TryTagDlqMessageFromPageAsync(receiver!, seq, Math.Max(1, take), props, ct);
-                                // Count send as success regardless of tagging result
+                                    // Fallback: tag the DLQ copy to indicate resubmission
+                                    var who = await GetSignedInIdentityAsync(ct);
+                                    var props = new Dictionary<string, object>
+                                    {
+                                        ["ResubmittedBy"] = who,
+                                        ["ResubmittedAt"] = DateTimeOffset.UtcNow.ToString("u")
+                                    };
+                                    await TryTagDlqMessageFromPageAsync(receiver!, seq, Math.Max(1, take), props, ct);
+                                    fail++;
+                                }
                                 success++;
                             }
                         }
