@@ -54,11 +54,29 @@ public class ParserTests
     }
 
     [Fact]
+    public void Parses_resubmit_expression()
+    {
+        var r = CommandParser.Parse("resubmit 10-12, 15");
+        r.Kind.Should().Be(CommandKind.Resubmit);
+        r.Index.Should().BeNull();
+        r.Raw.Should().Be("10-12, 15");
+    }
+
+    [Fact]
     public void Parses_delete_command()
     {
         var d = CommandParser.Parse("delete 10");
         d.Kind.Should().Be(CommandKind.Delete);
         d.Index.Should().Be(10);
+    }
+
+    [Fact]
+    public void Parses_delete_expression()
+    {
+        var d = CommandParser.Parse("delete 1, 3-4");
+        d.Kind.Should().Be(CommandKind.Delete);
+        d.Index.Should().BeNull();
+        d.Raw.Should().Be("1, 3-4");
     }
 
     [Fact]
@@ -101,5 +119,24 @@ public class TextTruncationTests
     public void Returns_input_if_fits()
     {
         TextTruncation.Truncate("abc", 5).Should().Be("abc");
+    }
+}
+
+public class SequenceExpressionTests
+{
+    [Fact]
+    public void Parses_mixed_ranges_and_numbers()
+    {
+        var expr = "514-516, 520, 522-523";
+        var list = ServiceBusCli.Core.SequenceExpression.Parse(expr);
+        list.Should().BeEquivalentTo(new List<long> { 514, 515, 516, 520, 522, 523 }, options => options.WithStrictOrdering());
+    }
+
+    [Fact]
+    public void Handles_whitespace_and_reverse_ranges()
+    {
+        var expr = " 10 - 8 , 12 ";
+        var list = ServiceBusCli.Core.SequenceExpression.Parse(expr);
+        list.Should().BeEquivalentTo(new List<long> { 8, 9, 10, 12 }, options => options.WithStrictOrdering());
     }
 }

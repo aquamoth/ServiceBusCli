@@ -26,7 +26,9 @@ public static class CommandParser
     private static readonly Regex RejectRe = new("^reject\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex RejectExprRe = new("^reject\\s+(?<e>.+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex ResubmitRe = new("^resubmit\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex ResubmitExprRe = new("^resubmit\\s+(?<e>.+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex DeleteRe = new("^delete\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex DeleteExprRe = new("^delete\\s+(?<e>.+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex SessionRe = new("^session(?:\\s+(?<t>.+))?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static ParsedCommand Parse(string? input)
@@ -60,10 +62,16 @@ public static class CommandParser
             return new ParsedCommand(CommandKind.Reject, Index: null, Raw: m.Groups["e"].Value.Trim());
         m = ResubmitRe.Match(text);
         if (m.Success && long.TryParse(m.Groups["n"].Value, out var rs))
-            return new ParsedCommand(CommandKind.Resubmit, Index: rs, Raw: text);
+            return new ParsedCommand(CommandKind.Resubmit, Index: rs, Raw: m.Groups["n"].Value);
+        m = ResubmitExprRe.Match(text);
+        if (m.Success)
+            return new ParsedCommand(CommandKind.Resubmit, Index: null, Raw: m.Groups["e"].Value.Trim());
         m = DeleteRe.Match(text);
         if (m.Success && long.TryParse(m.Groups["n"].Value, out var del))
-            return new ParsedCommand(CommandKind.Delete, Index: del, Raw: text);
+            return new ParsedCommand(CommandKind.Delete, Index: del, Raw: m.Groups["n"].Value);
+        m = DeleteExprRe.Match(text);
+        if (m.Success)
+            return new ParsedCommand(CommandKind.Delete, Index: null, Raw: m.Groups["e"].Value.Trim());
         m = SessionRe.Match(text);
         if (m.Success)
         {

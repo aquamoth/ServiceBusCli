@@ -552,7 +552,7 @@ public sealed partial class BrowserApp
                     needsRender = true;
                     continue;
                 }
-                else if (view == View.Messages && cmd.Kind == CommandKind.Resubmit && cmd.Index is > 0)
+                else if (view == View.Messages && cmd.Kind == CommandKind.Resubmit)
                 {
                     // Resubmit a DLQ message back to the active queue (clone and send)
                     if (selectedEntity is not QueueEntity)
@@ -567,57 +567,72 @@ public sealed partial class BrowserApp
                         needsRender = true;
                         continue;
                     }
-                    var seq = cmd.Index!.Value;
-                    var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
-                    if (targetRow is null)
+                    var visibleSeq = new HashSet<long>(messages.Select(m => m.SequenceNumber));
+                    var targets = new List<long>();
+                    if (cmd.Index is > 0)
                     {
-                        status = "Sequence not in current page; not resubmitting.";
+                        if (visibleSeq.Contains(cmd.Index.Value)) targets.Add(cmd.Index.Value);
+                    }
+                    else if (!string.IsNullOrWhiteSpace(cmd.Raw))
+                    {
+                        foreach (var s in ServiceBusCli.Core.SequenceExpression.Parse(cmd.Raw)) if (visibleSeq.Contains(s)) targets.Add(s);
+                    }
+                    targets = targets.Distinct().OrderBy(x => x).ToList();
+                    if (targets.Count == 0)
+                    {
+                        status = "No matching visible sequences to resubmit.";
                         needsRender = true;
                         continue;
                     }
                     try
                     {
-                        Logger.Info("Resubmit start seq=" + seq + " entity=" + (selectedEntity is QueueEntity qent ? qent.QueueName : "(not queue)") + " mode=" + _messageMode + " sessionEnabled=" + sessionEnabled);
+                        Logger.Info("Resubmit start targets=" + string.Join(',', targets) + " entity=" + (selectedEntity is QueueEntity qent ? qent.QueueName : "(not queue)") + " mode=" + _messageMode + " sessionEnabled=" + sessionEnabled);
                         var qe = (QueueEntity)selectedEntity!;
                         var sender = messageClient?.CreateSender(qe.QueueName) ?? new ServiceBusClient(selectedNs!.FullyQualifiedNamespace, _credential).CreateSender(qe.QueueName);
-                        // Create clone payload from current page (no extra server calls)
-                        var clone = CloneForResubmit(targetRow);
-                        await sender.SendMessageAsync(clone, ct);
-                        if (sessionEnabled == true)
+                        int success = 0, fail = 0;
+                        foreach (var seq in targets)
                         {
-                            string? cs = _amqpConnectionString;
-                            if (!string.IsNullOrWhiteSpace(cs) && !string.IsNullOrEmpty(targetRow.SessionId))
+                            var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                            if (targetRow is null) { fail++; continue; }
+                            var clone = CloneForResubmit(targetRow);
+                            await sender.SendMessageAsync(clone, ct);
+                            if (sessionEnabled == true)
                             {
-                                var amqp = new AmqpDlqClient();
-                                int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.Ordinal))
-                                    .TakeWhile(m => m.SequenceNumber <= seq).Count();
-                                Logger.Info("AMQP DLQ completion attempt host=" + selectedNs!.FullyQualifiedNamespace + " queue=" + qe.QueueName + " session=" + targetRow.SessionId + " seq=" + seq);
-                                var a0 = DateTime.UtcNow;
-                                bool ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, takeWithinSession, cs, ct);
-                                Logger.Info("AMQP DLQ completion result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
-                                status = ok
-                                    ? $"Resubmitted sequence {seq} and completed DLQ copy in session {targetRow.SessionId}."
-                                    : $"Resubmitted sequence {seq}. Could not complete DLQ copy (AMQP experimental path failed).";
+                                string? cs = _amqpConnectionString;
+                                if (!string.IsNullOrWhiteSpace(cs) && !string.IsNullOrEmpty(targetRow.SessionId))
+                                {
+                                    var amqp = new AmqpDlqClient();
+                                    int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.OrdinalIgnoreCase))
+                                        .TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                    Logger.Info($"AMQP DLQ completion attempt host={selectedNs!.FullyQualifiedNamespace} queue={qe.QueueName} session={targetRow.SessionId} seq={seq}");
+                                    var a0 = DateTime.UtcNow;
+                                    bool ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, Math.Max(1, takeWithinSession), cs, ct);
+                                    Logger.Info("AMQP DLQ completion result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
+                                    if (ok) success++; else fail++;
+                                }
+                                else
+                                {
+                                    // No AMQP available; we still consider the send successful
+                                    success++;
+                                }
                             }
                             else
                             {
-                                status = $"Resubmitted sequence {seq} from DLQ session {targetRow.SessionId}. (Provide --connection-string or set SERVICEBUS_CONNECTION_STRING to enable AMQP DLQ completion)";
+                                // Tag DLQ copy as resubmitted by abandoning with properties
+                                (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
+                                int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                var who = await GetSignedInIdentityAsync(ct);
+                                var props = new Dictionary<string, object>
+                                {
+                                    ["ResubmittedBy"] = who,
+                                    ["ResubmittedAt"] = DateTimeOffset.UtcNow.ToString("u")
+                                };
+                                var tagged = await TryTagDlqMessageFromPageAsync(receiver!, seq, Math.Max(1, take), props, ct);
+                                // Count send as success regardless of tagging result
+                                success++;
                             }
                         }
-                        else
-                        {
-                            // Tag DLQ copy as resubmitted by abandoning with properties
-                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
-                            int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
-                            var who = await GetSignedInIdentityAsync(ct);
-                            var props = new Dictionary<string, object>
-                            {
-                                ["ResubmittedBy"] = who,
-                                ["ResubmittedAt"] = DateTimeOffset.UtcNow.ToString("u")
-                            };
-                            var tagged = await TryTagDlqMessageFromPageAsync(receiver!, seq, take, props, ct);
-                            status = tagged ? $"Resubmitted sequence {seq} from DLQ and tagged DLQ copy." : $"Resubmitted sequence {seq} from DLQ. (Could not tag DLQ copy)";
-                        }
+                        status = $"Resubmitted {success} message(s)" + (fail > 0 ? $", {fail} DLQ completions failed" : string.Empty) + ".";
                         // Refresh the DLQ page after operation
                         if (sessionEnabled == true)
                         {
@@ -644,7 +659,7 @@ public sealed partial class BrowserApp
                     }
                     needsRender = true;
                 }
-                else if (view == View.Messages && cmd.Kind == CommandKind.Delete && cmd.Index is > 0)
+                else if (view == View.Messages && cmd.Kind == CommandKind.Delete)
                 {
                     // Delete (complete) a specific message from DLQ
                     if (_messageMode != MessageMode.DeadLetter)
@@ -653,43 +668,61 @@ public sealed partial class BrowserApp
                         needsRender = true;
                         continue;
                     }
-                    var seq = cmd.Index!.Value;
-                    var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
-                    if (targetRow is null)
+                    var visibleSeq = new HashSet<long>(messages.Select(m => m.SequenceNumber));
+                    var targets = new List<long>();
+                    if (cmd.Index is > 0)
                     {
-                        status = "Sequence not in current page; not deleting.";
+                        if (visibleSeq.Contains(cmd.Index.Value)) targets.Add(cmd.Index.Value);
+                    }
+                    else if (!string.IsNullOrWhiteSpace(cmd.Raw))
+                    {
+                        foreach (var s in ServiceBusCli.Core.SequenceExpression.Parse(cmd.Raw)) if (visibleSeq.Contains(s)) targets.Add(s);
+                    }
+                    targets = targets.Distinct().OrderBy(x => x).ToList();
+                    if (targets.Count == 0)
+                    {
+                        status = "No matching visible sequences to delete.";
                         needsRender = true;
                         continue;
                     }
                     try
                     {
                         var qe = (QueueEntity)selectedEntity!;
-                        if (sessionEnabled == true && !string.IsNullOrEmpty(targetRow.SessionId))
+                        int success = 0, fail = 0;
+                        if (sessionEnabled == true)
                         {
                             string? cs = _amqpConnectionString;
-                            if (!string.IsNullOrWhiteSpace(cs))
-                            {
-                                var amqp = new AmqpDlqClient();
-                                int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.Ordinal))
-                                    .TakeWhile(m => m.SequenceNumber <= seq).Count();
-                                Logger.Info("AMQP DLQ delete attempt host=" + selectedNs!.FullyQualifiedNamespace + " queue=" + qe.QueueName + " session=" + targetRow.SessionId + " seq=" + seq);
-                                var a0 = DateTime.UtcNow;
-                                bool ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, takeWithinSession, cs, ct);
-                                Logger.Info("AMQP DLQ delete result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
-                                status = ok ? $"Deleted DLQ message {seq} in session {targetRow.SessionId}." : $"Delete failed (AMQP path).";
-                            }
-                            else
+                            if (string.IsNullOrWhiteSpace(cs))
                             {
                                 status = "Delete requires --connection-string for session DLQ.";
+                                needsRender = true;
+                                continue;
+                            }
+                            var amqp = new AmqpDlqClient();
+                            foreach (var seq in targets)
+                            {
+                                var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                                if (targetRow is null || string.IsNullOrEmpty(targetRow.SessionId)) { fail++; continue; }
+                                int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.OrdinalIgnoreCase))
+                                    .TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                Logger.Info($"AMQP DLQ delete attempt host={selectedNs!.FullyQualifiedNamespace} queue={qe.QueueName} session={targetRow.SessionId} seq={seq}");
+                                var a0 = DateTime.UtcNow;
+                                bool ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, Math.Max(1, takeWithinSession), cs, ct);
+                                Logger.Info("AMQP DLQ delete result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
+                                if (ok) success++; else fail++;
                             }
                         }
                         else
                         {
                             (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
-                            int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
-                            var deleted = await TryDeleteDlqMessageFromPageAsync(receiver!, seq, take, ct);
-                            status = deleted ? $"Deleted DLQ message {seq}." : $"Delete failed (not found in page).";
+                            foreach (var seq in targets)
+                            {
+                                int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                var deleted = await TryDeleteDlqMessageFromPageAsync(receiver!, seq, Math.Max(1, take), ct);
+                                if (deleted) success++; else fail++;
+                            }
                         }
+                        status = $"Deleted {success} message(s)" + (fail > 0 ? $", {fail} failed" : string.Empty) + ".";
 
                         // Refresh DLQ page for non-session; avoid SDK refresh when sessionEnabled
                         if (sessionEnabled != true)
@@ -1221,7 +1254,7 @@ public sealed partial class BrowserApp
             {
                 View.Namespaces => "PageUp/PageDown, ESC. Type 'open <n>' to select namespace.",
                 View.Entities => "PageUp/PageDown, ESC. Commands: 'queue <n>' or 'dlq <n>'.",
-                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <expr>', 'resubmit <seq>', 'delete <seq>', 'session <id>', 'dlq', 'queue'; history Up/Down.",
+                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <expr>', 'resubmit <expr>', 'delete <expr>', 'session <id>', 'dlq', 'queue'; history Up/Down.",
                 _ => "PageUp/PageDown, ESC."
             };
             Console.WriteLine(TextTruncation.Truncate(hint, Console.WindowWidth));
