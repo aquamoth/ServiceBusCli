@@ -24,6 +24,7 @@ public static class CommandParser
     private static readonly Regex QueueRe = new("^queue\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex DlqRe = new("^dlq\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex RejectRe = new("^reject\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex RejectExprRe = new("^reject\\s+(?<e>.+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex ResubmitRe = new("^resubmit\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex DeleteRe = new("^delete\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex SessionRe = new("^session(?:\\s+(?<t>.+))?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -53,7 +54,10 @@ public static class CommandParser
             return new ParsedCommand(CommandKind.Dlq, Index: dn, Raw: text);
         m = RejectRe.Match(text);
         if (m.Success && long.TryParse(m.Groups["n"].Value, out var rj))
-            return new ParsedCommand(CommandKind.Reject, Index: rj, Raw: text);
+            return new ParsedCommand(CommandKind.Reject, Index: rj, Raw: m.Groups["n"].Value);
+        m = RejectExprRe.Match(text);
+        if (m.Success)
+            return new ParsedCommand(CommandKind.Reject, Index: null, Raw: m.Groups["e"].Value.Trim());
         m = ResubmitRe.Match(text);
         if (m.Success && long.TryParse(m.Groups["n"].Value, out var rs))
             return new ParsedCommand(CommandKind.Resubmit, Index: rs, Raw: text);
