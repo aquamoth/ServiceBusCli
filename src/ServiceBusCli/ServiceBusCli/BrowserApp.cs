@@ -21,6 +21,7 @@ public sealed partial class BrowserApp
     private readonly string? _tSubArg;
 
     private readonly string? _amqpConnectionString;
+    private string? _sessionFilter; // when set, only show messages with this SessionId
 
     public BrowserApp(TokenCredential credential, IServiceBusDiscovery discovery, Theme theme,
         string? azureSubscriptionId = null, string? nsArg = null, string? queueArg = null, string? topicArg = null, string? topicSubscriptionArg = null, string? startupStatus = null, string? amqpConnectionString = null)
@@ -283,8 +284,8 @@ public sealed partial class BrowserApp
                             {
                                 (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, _messageMode, messageClient, receiver, ct);
                                 messages.Clear();
-                                var req3 = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
-                                messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req3, ct));
+                        var req3 = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req3, ct));
                                 try { _activeMessageCount = await GetActiveMessageCountAsync(selectedNs!, selectedEntity!, ct); } catch { _activeMessageCount = null; }
                             }
                             catch (Exception ex) when (IsUnauthorized(ex))
@@ -298,6 +299,41 @@ public sealed partial class BrowserApp
                 else if (cmd.Kind == CommandKind.Help)
                 {
                     // No-op; header shows basic help
+                }
+                else if (view == View.Messages && cmd.Kind == CommandKind.Session)
+                {
+                    // Apply a session filter when viewing a session-enabled entity
+                    try
+                    {
+                        if (sessionEnabled != true)
+                        {
+                            status = "Session filter requires a session-enabled queue.";
+                            needsRender = true;
+                            continue;
+                        }
+                        if (string.IsNullOrWhiteSpace(cmd.Raw))
+                        {
+                            _sessionFilter = null;
+                            status = "Session filter cleared.";
+                        }
+                        else
+                        {
+                            _sessionFilter = cmd.Raw!.Trim();
+                            status = $"Filtering by session prefix '{_sessionFilter}'.";
+                        }
+                        pageHistory.Clear();
+                        nextFromSequence = 1;
+                        _msgPage = 1;
+                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, _messageMode, messageClient, receiver, ct);
+                        messages.Clear();
+                        var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
+                    }
+                    catch (Exception ex)
+                    {
+                        status = $"Session filter failed: {ex.Message}";
+                    }
+                    needsRender = true;
                 }
                 else if (view == View.Messages && cmd.Kind == CommandKind.Open && cmd.Index is > 0)
                 {
@@ -347,6 +383,7 @@ public sealed partial class BrowserApp
                                 m.Enqueued,
                                 m.MessageId,
                                 m.Subject,
+                                m.SessionId,
                                 m.ContentType,
                                 m.Body,
                                 m.ApplicationProperties
@@ -774,23 +811,38 @@ public sealed partial class BrowserApp
 
     private async Task<List<MessageRow>> FetchMessagesPageAsync(ServiceBusReceiver rcv, long fromSeq, int requested, CancellationToken ct)
     {
-        long start = Math.Max(1, fromSeq);
-        var msgs = await rcv.PeekMessagesAsync(requested, fromSequenceNumber: start, cancellationToken: ct);
-        var list = new List<MessageRow>(msgs.Count);
-        foreach (var m in msgs)
+        long cursor = Math.Max(1, fromSeq);
+        int target = Math.Max(1, requested);
+        var list = new List<MessageRow>(target);
+        var deadline = DateTime.UtcNow.AddSeconds(2); // keep UI responsive
+        string? filter = _sessionFilter;
+        while (list.Count < target && DateTime.UtcNow < deadline)
         {
-            var body = TryPreview(m.Body);
-            list.Add(new MessageRow(
-                m.SequenceNumber,
-                m.EnqueuedTime,
-                m.MessageId,
-                m.Subject,
-                m.SessionId,
-                m.ContentType,
-                body,
-                m.Body,
-                new Dictionary<string, object>(m.ApplicationProperties)
-            ));
+            var batchSize = Math.Max(target * 2, 20);
+            var msgs = await rcv.PeekMessagesAsync(batchSize, fromSequenceNumber: cursor, cancellationToken: ct);
+            if (msgs == null || msgs.Count == 0) break;
+            foreach (var m in msgs)
+            {
+                cursor = m.SequenceNumber + 1;
+                if (!string.IsNullOrEmpty(filter) && (m.SessionId == null || !m.SessionId.StartsWith(filter, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+                var body = TryPreview(m.Body);
+                list.Add(new MessageRow(
+                    m.SequenceNumber,
+                    m.EnqueuedTime,
+                    m.MessageId,
+                    m.Subject,
+                    m.SessionId,
+                    m.ContentType,
+                    body,
+                    m.Body,
+                    new Dictionary<string, object>(m.ApplicationProperties)
+                ));
+                if (list.Count >= target) break;
+            }
+            if (msgs.Count < batchSize) break; // end reached
         }
         return list;
     }
@@ -1157,7 +1209,7 @@ public sealed partial class BrowserApp
             {
                 View.Namespaces => "PageUp/PageDown, ESC. Type 'open <n>' to select namespace.",
                 View.Entities => "PageUp/PageDown, ESC. Commands: 'queue <n>' or 'dlq <n>'.",
-                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <seq>', 'resubmit <seq>', 'delete <seq>', 'dlq', 'queue'; history Up/Down.",
+                View.Messages => "PageUp/PageDown, ESC. Commands: 'open <seq>', 'reject <seq>', 'resubmit <seq>', 'delete <seq>', 'session <id>', 'dlq', 'queue'; history Up/Down.",
                 _ => "PageUp/PageDown, ESC."
             };
             Console.WriteLine(TextTruncation.Truncate(hint, Console.WindowWidth));
@@ -1186,6 +1238,10 @@ public sealed partial class BrowserApp
                 case SubscriptionEntity s:
                     segments.Add(("Subscription:", $"{s.TopicName}/{s.SubscriptionName}"));
                     break;
+            }
+            if (!string.IsNullOrEmpty(_sessionFilter))
+            {
+                segments.Add(("Filter:", $"session {_sessionFilter}"));
             }
         }
         if (segments.Count == 0) return 0;

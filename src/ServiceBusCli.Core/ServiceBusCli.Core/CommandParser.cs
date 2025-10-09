@@ -12,7 +12,8 @@ public enum CommandKind
     Dlq,
     Reject,
     Resubmit,
-    Delete
+    Delete,
+    Session
 }
 
 public sealed record ParsedCommand(CommandKind Kind, long? Index = null, string? Raw = null);
@@ -25,6 +26,7 @@ public static class CommandParser
     private static readonly Regex RejectRe = new("^reject\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex ResubmitRe = new("^resubmit\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex DeleteRe = new("^delete\\s+(?<n>\\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex SessionRe = new("^session(?:\\s+(?<t>.+))?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static ParsedCommand Parse(string? input)
     {
@@ -58,6 +60,12 @@ public static class CommandParser
         m = DeleteRe.Match(text);
         if (m.Success && long.TryParse(m.Groups["n"].Value, out var del))
             return new ParsedCommand(CommandKind.Delete, Index: del, Raw: text);
+        m = SessionRe.Match(text);
+        if (m.Success)
+        {
+            var t = m.Groups["t"].Success ? m.Groups["t"].Value.Trim() : null;
+            return new ParsedCommand(CommandKind.Session, Index: null, Raw: t);
+        }
         return new ParsedCommand(CommandKind.None, Raw: text);
     }
 }

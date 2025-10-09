@@ -61,6 +61,24 @@ public class ParserTests
         d.Index.Should().Be(10);
     }
 
+    [Fact]
+    public void Parses_session_command()
+    {
+        var s = CommandParser.Parse("session 14432");
+        s.Kind.Should().Be(CommandKind.Session);
+        s.Index.Should().BeNull();
+        s.Raw.Should().Be("14432");
+    }
+
+    [Fact]
+    public void Parses_session_clear()
+    {
+        var s = CommandParser.Parse("session");
+        s.Kind.Should().Be(CommandKind.Session);
+        s.Index.Should().BeNull();
+        s.Raw.Should().BeNull();
+    }
+
     [Theory]
     [InlineData("h")]
     [InlineData("help")]

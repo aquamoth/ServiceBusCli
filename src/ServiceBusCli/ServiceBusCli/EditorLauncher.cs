@@ -24,6 +24,8 @@ public static class EditorLauncher
         sb.AppendLine($"MessageId: {row.MessageId ?? string.Empty}");
         sb.AppendLine($"Subject: {row.Subject ?? string.Empty}");
         sb.AppendLine($"SequenceNumber: {row.SequenceNumber}");
+        if (!string.IsNullOrEmpty(row.SessionId))
+            sb.AppendLine($"SessionId: {row.SessionId}");
         if (row.Enqueued is DateTimeOffset enq)
             sb.AppendLine($"Enqueued: {enq:u}");
         sb.AppendLine($"ContentType: {row.ContentType ?? string.Empty}");

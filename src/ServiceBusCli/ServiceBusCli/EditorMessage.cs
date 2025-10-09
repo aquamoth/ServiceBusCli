@@ -9,8 +9,8 @@ public sealed record EditorMessage(
     DateTimeOffset? Enqueued,
     string? MessageId,
     string? Subject,
+    string? SessionId,
     string? ContentType,
     BinaryData Body,
     IReadOnlyDictionary<string, object> ApplicationProperties
 );
-
