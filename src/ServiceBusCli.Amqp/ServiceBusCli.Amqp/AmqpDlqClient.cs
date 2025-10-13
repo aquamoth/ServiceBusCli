@@ -8,11 +8,14 @@ using System.Threading.Tasks;
 using Amqp;
 using Amqp.Framing;
 using Amqp.Types;
+using Azure.Core;
 
 namespace ServiceBusCli.Amqp;
 
 public sealed class AmqpDlqClient : IAmqpDlqClient
 {
+    private const string CbsAddress = "$cbs";
+
     public async Task<bool> CompleteDlqSessionMessageAsync(
         string fullyQualifiedNamespace,
         string queueName,
@@ -102,7 +105,7 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
         }
     }
 
-    private static long? TryGetSequenceNumber(global::Amqp.Message msg)
+    internal static long? TryGetSequenceNumber(global::Amqp.Message msg)
     {
         try
         {
@@ -122,7 +125,7 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
         return null;
     }
 
-    private static string? TryGetSessionId(global::Amqp.Message msg)
+    internal static string? TryGetSessionId(global::Amqp.Message msg)
     {
         try
         {
@@ -166,7 +169,7 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
         return conn;
     }
 
-    private static async Task<global::Amqp.Connection> ConnectWithRetryAsync(global::Amqp.Address addr, DateTime deadline, CancellationToken ct)
+    internal static async Task<global::Amqp.Connection> ConnectWithRetryAsync(global::Amqp.Address addr, DateTime deadline, CancellationToken ct)
     {
         Exception? last = null;
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
@@ -191,7 +194,7 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
         throw new TimeoutException($"AMQP connect failed within deadline: {last?.Message}");
     }
 
-    private static string NormalizeHost(string nsHost)
+    internal static string NormalizeHost(string nsHost)
     {
         var v = (nsHost ?? string.Empty).Trim();
         v = v.Replace("https://", string.Empty).Replace("http://", string.Empty).Replace("sb://", string.Empty);
@@ -202,4 +205,137 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
         if (colon >= 0) v = v[..colon];
         return v;
     }
+}
+
+public static class AmqpDlqClientAadExtensions
+{
+    // AAD (JWT via CBS) variant: uses SASL-ANONYMOUS and puts a JWT token on $cbs for the DLQ entity.
+    public static async Task<bool> CompleteDlqSessionMessageWithAadAsync(
+        this AmqpDlqClient client,
+        TokenCredential credential,
+        string fullyQualifiedNamespace,
+        string queueName,
+        string sessionId,
+        long sequenceNumber,
+        int maxReceive,
+        CancellationToken ct)
+    {
+        string host = NormalizeHost(fullyQualifiedNamespace);
+        string addressPath = $"{queueName}/$DeadLetterQueue";
+        string audience = $"sb://{host}/{addressPath}";
+
+        var addr = new Address(host, 5671, null, null); // SASL-ANONYMOUS
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        var conn = await ConnectWithRetryAsync(addr, deadline, ct).ConfigureAwait(false);
+        var session = new Session(conn);
+
+        ReceiverLink? cbsReceiver = null;
+        SenderLink? cbsSender = null;
+        ReceiverLink? receiver = null;
+        try
+        {
+            // Acquire AAD access token
+            var token = await credential.GetTokenAsync(new TokenRequestContext(new[] { "https://servicebus.azure.net/.default" }), ct).ConfigureAwait(false);
+
+            // Create CBS links
+            cbsReceiver = new ReceiverLink(session, $"cbs-recv-{Guid.NewGuid():N}", "$cbs");
+            cbsSender = new SenderLink(session, $"cbs-send-{Guid.NewGuid():N}", "$cbs");
+
+            // Send put-token
+            var messageId = Guid.NewGuid().ToString();
+            var put = new Message(token.Token)
+            {
+                Properties = new Properties { MessageId = messageId, ReplyTo = $"cbs-reply-{messageId}" },
+                ApplicationProperties = new ApplicationProperties
+                {
+                    ["operation"] = "put-token",
+                    ["type"] = "servicebus.windows.net:jwt",
+                    ["name"] = audience
+                }
+            };
+            await cbsSender.SendAsync(put).ConfigureAwait(false);
+
+            // Wait for CBS response
+            var cbsDeadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < cbsDeadline && !ct.IsCancellationRequested)
+            {
+                var remain = cbsDeadline - DateTime.UtcNow;
+                var msg = await cbsReceiver.ReceiveAsync(remain > TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : remain).ConfigureAwait(false);
+                if (msg == null) continue;
+                try
+                {
+                    // Check status-code and correlation
+                    int status = 0;
+                    if (msg.ApplicationProperties?.Map is Map map && map.TryGetValue("status-code", out var scObj))
+                    {
+                        if (scObj is int i) status = i; else int.TryParse(Convert.ToString(scObj), out status);
+                    }
+                    if (status == 200)
+                    {
+                        cbsReceiver.Accept(msg);
+                        break;
+                    }
+                    else
+                    {
+                        cbsReceiver.Reject(msg);
+                        return false;
+                    }
+                }
+                finally { /* fall-through */ }
+            }
+
+            // Browse DLQ and accept target
+            var source = new Source { Address = addressPath };
+            var attach = new Attach { Source = source, Target = new Target() };
+            receiver = new ReceiverLink(session, $"dlq-browse-{Guid.NewGuid():N}", attach, null);
+            var credit = Math.Min(500, Math.Max(50, maxReceive * 5));
+            receiver.SetCredit(credit, false);
+
+            var browseDeadline = DateTime.UtcNow.AddSeconds(20);
+            while (DateTime.UtcNow < browseDeadline && !ct.IsCancellationRequested)
+            {
+                var remain = browseDeadline - DateTime.UtcNow;
+                var wait = remain > TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : remain;
+                var msg = await receiver.ReceiveAsync(wait).ConfigureAwait(false);
+                if (msg == null) continue;
+                var sid = TryGetSessionId(msg);
+                var seq = TryGetSequenceNumber(msg);
+                if (!string.IsNullOrEmpty(sessionId) && !string.Equals(sid, sessionId, StringComparison.Ordinal))
+                {
+                    receiver.Release(msg);
+                    continue;
+                }
+                if (seq.HasValue && seq.Value == sequenceNumber)
+                {
+                    receiver.Accept(msg);
+                    return true;
+                }
+                receiver.Release(msg);
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            _ = Task.Run(() =>
+            {
+                try { receiver?.Close(); } catch { }
+                try { cbsSender?.Close(); } catch { }
+                try { cbsReceiver?.Close(); } catch { }
+                try { session.Close(); } catch { }
+                try { conn.Close(); } catch { }
+            });
+        }
+    }
+
+    private static long? TryGetSequenceNumber(global::Amqp.Message msg)
+        => AmqpDlqClient.TryGetSequenceNumber(msg);
+    private static string? TryGetSessionId(global::Amqp.Message msg)
+        => AmqpDlqClient.TryGetSessionId(msg);
+    private static async Task<Connection> ConnectWithRetryAsync(Address addr, DateTime deadline, CancellationToken ct)
+        => await ServiceBusCli.Amqp.AmqpDlqClient.ConnectWithRetryAsync(addr, deadline, ct).ConfigureAwait(false);
+    private static string NormalizeHost(string h) => ServiceBusCli.Amqp.AmqpDlqClient.NormalizeHost(h);
 }

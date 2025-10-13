@@ -59,6 +59,7 @@ CLI options (current):
 - `--topic <name>` and `--topic-subscription <name>`: Preselect topic subscription
 - `--auth <auto|device|browser|cli|vscode>`: Auth mode (default: auto)
 - `--tenant <guid>`: Entra tenant ID
+- `--connection-string <SAS>`: Optional; SAS fallback for AMQP operations (AAD is preferred and sufficient)
 - `--theme <name>`: Theme preset (`default`, `mono`, `no-color`, `solarized`)
 - `--no-color`: Disable color output
 
@@ -75,8 +76,11 @@ Commands:
 - `reject <expr>`: Move messages from an active queue to its DLQ
   - `<expr>` supports single numbers, ranges (`514-590`), and comma-separated lists (`595,597,602-607`); applies to visible rows
 - `resubmit <expr>`: From a queue’s DLQ view, clone messages back into the main queue and remove them from DLQ
-  - Attempts SDK completion of the DLQ copy after clone-and-send; if not confirmed within bounds, tags the DLQ copy with `ResubmittedBy`/`ResubmittedAt`
+  - Non-session queues: completes the DLQ copy via SDK (AAD); if not confirmed within bounds, tags the DLQ copy with `ResubmittedBy`/`ResubmittedAt`
+  - Session-enabled queues: uses AMQP with AAD (CBS/JWT) to complete the DLQ copy; if AMQP completion fails, falls back to SAS if provided
 - `delete <expr>`: From a queue’s DLQ view, complete (delete) DLQ messages
+  - Non-session queues: completes via SDK (AAD)
+  - Session-enabled queues: uses AMQP with AAD (CBS/JWT); falls back to SAS if provided
 - `dlq` / `queue` (in Messages): Toggle between viewing a queue and its DLQ
 - `session <text>`: Filter Messages view by `SessionId` prefix (repeat `session` with no text to clear)
 - `help | h | ?`: Show commands and usage
@@ -101,11 +105,12 @@ External editor resolution: `$VISUAL` → `$EDITOR` → OS default (`xdg-open` o
 ### Environment
 
 - `AZURE_TENANT_ID`: Entra tenant ID
+- `SERVICEBUS_CONNECTION_STRING`: Optional SAS fallback for AMQP features (not required with AAD)
 
 ## Status
 
 - v0: AAD auth + ARM discovery, entity browsing, paged message listing, external editor open, themes/colorization
-- DLQ workflows: peek, resubmit, delete; range/list expressions; AAD-only (no connection string required)
+- DLQ workflows: peek, resubmit, delete; range/list expressions; AAD-only (no connection string required). AMQP with AAD (CBS/JWT) is used for session-enabled DLQ operations.
 - Session support: shows `SessionId` when present; `session` prefix filter
 - Future: additional filters, JSON pretty-print, broader clone/send workflows
 
