@@ -23,20 +23,20 @@ Using the solution:
 ```bash
 dotnet restore ServiceBusCli.sln
 dotnet build ServiceBusCli.sln
-dotnet run --project src/ServiceBusCli -- --auth device
+dotnet run --project src/ServiceBusCli/ServiceBusCli -- --auth device
 ```
 
 Preselect an entity:
 
 ```bash
 # Queue
- dotnet run --project src/ServiceBusCli -- \
+ dotnet run --project src/ServiceBusCli/ServiceBusCli -- \
   --auth device \
   --namespace <ns-name-or-fqdn> \
   --queue <queue-name>
 
 # Subscription
- dotnet run --project src/ServiceBusCli -- \
+ dotnet run --project src/ServiceBusCli/ServiceBusCli -- \
   --auth device \
   --namespace <ns-name-or-fqdn> \
   --topic <topic-name> \
@@ -69,15 +69,16 @@ Keyboard actions:
 - Command line: Type commands at the bottom, press Enter to execute
 - History: Up/Down cycles previous commands; draft preserved while navigating
 
-Commands (initial):
+Commands:
 
-- `open <seq>`: Open a message by sequence number in the external editor
-- `reject <seq>`: Move a message (by sequence) from an active queue to its DLQ
-  - Queues only; page-only (message must be on the current page); sessions supported using the session from the page.
-- `resubmit <seq>`: From a queue’s DLQ view, clone the message back into the main queue and remove it from DLQ
-  - Page-only: the sequence must be on the current page; sessions supported using the session from the page.
-  - For session DLQ completion, provide AMQP SAS via `--connection-string` (or env `SERVICEBUS_CONNECTION_STRING`). The app will attempt to complete the DLQ copy via AMQP; otherwise it still resubmits the message.
+- `open <n>`: Open message number `n` from the current page in the external editor
+- `reject <expr>`: Move messages from an active queue to its DLQ
+  - `<expr>` supports single numbers, ranges (`514-590`), and comma-separated lists (`595,597,602-607`); applies to visible rows
+- `resubmit <expr>`: From a queue’s DLQ view, clone messages back into the main queue and remove them from DLQ
+  - Attempts SDK completion of the DLQ copy after clone-and-send; if not confirmed within bounds, tags the DLQ copy with `ResubmittedBy`/`ResubmittedAt`
+- `delete <expr>`: From a queue’s DLQ view, complete (delete) DLQ messages
 - `dlq` / `queue` (in Messages): Toggle between viewing a queue and its DLQ
+- `session <text>`: Filter Messages view by `SessionId` prefix (repeat `session` with no text to clear)
 - `help | h | ?`: Show commands and usage
 - `quit | q | exit`: Quit
 
@@ -87,7 +88,7 @@ External editor resolution: `$VISUAL` → `$EDITOR` → OS default (`xdg-open` o
 
 - `ServiceBusCli.sln`: Solution
 - `src/ServiceBusCli.Core`: Core domain (models, selection, theme helpers)
-- `src/ServiceBusCli`: Console app (TUI, input handling, editor integration)
+- `src/ServiceBusCli/ServiceBusCli`: Console app (TUI, input handling, editor integration)
 - `tests/ServiceBusCli.Core.Tests`, `tests/ServiceBusCli.Tests`: Unit tests
 
 ## Implementation Notes
@@ -100,12 +101,13 @@ External editor resolution: `$VISUAL` → `$EDITOR` → OS default (`xdg-open` o
 ### Environment
 
 - `AZURE_TENANT_ID`: Entra tenant ID
-- `SERVICEBUS_CONNECTION_STRING` (planned): SAS fallback
 
 ## Status
 
-- v0: Auth + discovery UI, paged message listing, external editor open, themes/colorization
-- Future: filters, DLQ peek, JSON pretty-print, clone/send workflows
+- v0: AAD auth + ARM discovery, entity browsing, paged message listing, external editor open, themes/colorization
+- DLQ workflows: peek, resubmit, delete; range/list expressions; AAD-only (no connection string required)
+- Session support: shows `SessionId` when present; `session` prefix filter
+- Future: additional filters, JSON pretty-print, broader clone/send workflows
 
 ## Contributing
 

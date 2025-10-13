@@ -57,7 +57,7 @@ Message Retrieval & Paging
 - Uses `ServiceBusReceiver.PeekMessagesAsync` to avoid locks. Maintains next sequence number to continue forward. Empty pages handled gracefully.
 - Queues use `CreateReceiver(queue)`. Subscriptions use `CreateReceiver(topic, subscription)`.
 
-Recent Changes (2025-10-06)
+Recent Changes (2025-10-06 .. 2025-10-08)
 - Sorting + selection: Namespaces sorted by Name, Entities sorted by Path. Selection indices map to this order; added unit tests to prove it.
 - Width logic improvements:
   - Namespaces: Use natural max widths; if content fits, do not expand (leave right side empty). If not, shrink Sub→ResourceGroup→Namespace; Sub prints full when there is space, else short 8-char.
@@ -67,14 +67,22 @@ Recent Changes (2025-10-06)
 - Navigation: ESC goes back using a generic view stack (Namespaces ← Entities ← Messages), restoring paging and selection state.
 - Stability: When switching namespaces/entities, receivers/clients are reset to avoid cross-namespace reuse (fixes 404/$management on prior namespace).
 
-AMQP Integration (Planned)
-- Add `ServiceBusCli.Amqp` project to encapsulate raw AMQP operations where SDK is missing features (e.g., DLQ session completion).
-- Initial target: DLQ session resubmit/complete path
-  - Use CBS auth via `SERVICEBUS_CONNECTION_STRING` (SAS) to keep the first cut simple.
-  - Open receiver to `sb://<ns>/<queue>/$DeadLetterQueue` with `com.microsoft:session-filter`.
-  - Bounded receive (page-only) up to the target; complete the target, abandon others.
-- Optional (future): AAD token via CBS using the app credential.
-- Fallback behavior when AMQP is unavailable/failing: always resubmit (clone/send) and tag DLQ copy (non-session via SDK; for session, tag when AMQP path succeeds, otherwise leave a clear status).
+- Session filtering and DLQ workflows:
+  - Session prefix filter: `session <text>` filters Messages view by SessionId prefix (case-insensitive); `session` clears the filter.
+  - Message details now include `SessionId` when present.
+  - Reject/resubmit/delete now accept flexible sequence expressions: single numbers, ranges (e.g., `514-590`), and comma-separated lists (e.g., `595,597,602-607`). Operations apply only to visible rows (respecting filters).
+  - Resubmit from DLQ: clones to active queue and attempts to complete the DLQ copy using SDK (AAD); if completion cannot be confirmed in the bounded window, tags the DLQ copy with `ResubmittedBy`/`ResubmittedAt`.
+  - Delete from DLQ: completes the message using SDK (AAD). Range delete supported.
+  - After resubmit/delete, the DLQ view refreshes.
+
+- Connection string removed:
+  - Eliminated the need for `SERVICEBUS_CONNECTION_STRING` and AMQP SAS; all operations use AAD (Azure.Identity) via the Azure SDK.
+  - Command-line `--connection-string` option and AMQP readiness checks removed.
+
+DLQ Operations (Current)
+- Use `Azure.Messaging.ServiceBus` with AAD to peek/receive/complete DLQ messages (no session links on sub-queues).
+- Session DLQ: handled without session receivers by bounded browsing and matching on `SessionId` and `SequenceNumber`.
+- Resubmit range flows attempt SDK completion of the DLQ copy after clone-and-send; fallback tagging provides traceability.
 
 Unit Tests
 - SelectionHelper ensures selection respects sorted order.
@@ -134,8 +142,7 @@ Build/Run (planned)
 Permissions & Environment
 - ARM discovery: Reader access (or higher) on subscription/RG/namespace. Owner on ARM does not confer data-plane rights.
 - Data plane (messages): requires `Azure Service Bus Data Receiver` (Listen) at namespace or entity scope; `Data Owner` grants Manage+Send+Listen.
-- Environment variables: `AZURE_TENANT_ID` (tenant), and future `SERVICEBUS_CONNECTION_STRING` for SAS fallback (see Next Steps).
-  - `SERVICEBUS_CONNECTION_STRING`: Enables AMQP DLQ session operations (CBS SAS) and may be needed for experimental features.
+- Environment variables: `AZURE_TENANT_ID` (tenant). No connection string is required.
 
 Risks & Mitigations
 - Large namespaces/entities: cap list and page sizes; lazy-load; add per-page timeouts.
@@ -166,7 +173,7 @@ Next Steps (implementation)
 - Header/context
   - Colorize and dynamically size the context line under the title (Namespace/Entity), mirroring AppConfigCli.
 - Discovery/auth
-  - SAS fallback: add `--connection-string` and env support; optional `--use-root-sas` (explicit) to fetch RootManageSharedAccessKey via ARM for Owners without data-plane RBAC.
+  - Optional SAS fallback (low priority): consider `--connection-string` only if AAD cannot be used, but target is AAD-first.
 - Tables
   - Apply full AppConfig-style table measurement to Namespaces/Entities (cursor/resize handling) and consider adding filter/search.
 - Navigation

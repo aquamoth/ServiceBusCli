@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: "Create release as draft"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build and test
+        run: |
+          dotnet restore ServiceBusCli.sln
+          dotnet build ServiceBusCli.sln -c Release --nologo --verbosity minimal
+          dotnet test ServiceBusCli.sln -c Release --nologo --verbosity minimal
+
+      - name: Compute version (NBGV)
+        id: nbgv
+        uses: dotnet/nbgv@v0.4.2
+        with:
+          setAllVars: true
+
+      - name: Show version
+        run: |
+          echo "NBGV_SimpleVersion=${NBGV_SimpleVersion}"
+          echo "NBGV_SemVer2=${NBGV_SemVer2}"
+          echo "NBGV_GitCommitIdShort=${NBGV_GitCommitIdShort}"
+
+      - name: Publish framework-dependent package
+        shell: bash
+        run: |
+          dotnet publish src/ServiceBusCli/ServiceBusCli/ServiceBusCli.csproj -c Release -o publish/fxdep
+          # Include README and platform launcher scripts
+          cp README.md publish/fxdep/ || true
+          cat > publish/fxdep/servicebuscli.sh << 'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          if ! command -v dotnet >/dev/null 2>&1; then
+            echo "dotnet runtime (9.0) is required to run ServiceBusCli" >&2
+            exit 1
+          fi
+          exec dotnet "$SCRIPT_DIR/ServiceBusCli.dll" "$@"
+          SH
+          chmod +x publish/fxdep/servicebuscli.sh
+          cat > publish/fxdep/servicebuscli.bat << 'BAT'
+          @echo off
+          setlocal
+          set SCRIPT_DIR=%~dp0
+          where dotnet >NUL 2>&1
+          if errorlevel 1 (
+            echo .NET 9 runtime is required to run ServiceBusCli
+            exit /b 1
+          )
+          dotnet "%SCRIPT_DIR%ServiceBusCli.dll" %*
+          BAT
+          # Ensure CRLF line endings for .bat on Windows
+          sed -i 's/$/\r/' publish/fxdep/servicebuscli.bat
+          NAME="ServiceBusCli-v${NBGV_SimpleVersion}+${NBGV_GitCommitIdShort}.zip"
+          (cd publish/fxdep && zip -r "../$NAME" .)
+          echo "RELEASE_ASSET=publish/$NAME" >> $GITHUB_ENV
+
+      - name: Create tag if missing
+        id: tag
+        shell: bash
+        run: |
+          TAG="v${NBGV_SimpleVersion}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "Created tag $TAG"
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.NBGV_SimpleVersion }}
+          name: ServiceBusCli v${{ env.NBGV_SimpleVersion }}+${{ env.NBGV_GitCommitIdShort }}
+          draft: ${{ inputs.draft == 'true' }}
+          generate_release_notes: true
+          body: |
+            Commit: ${{ env.NBGV_GitCommitId }} (${{ env.NBGV_GitCommitIdShort }})
+            Version: ${{ env.NBGV_SemVer2 }}
+          files: |
+            ${{ env.RELEASE_ASSET }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
