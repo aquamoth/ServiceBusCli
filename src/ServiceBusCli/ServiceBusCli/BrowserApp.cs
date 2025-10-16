@@ -758,14 +758,11 @@ public sealed partial class BrowserApp
                         }
                         status = $"Deleted {success} message(s)" + (fail > 0 ? $", {fail} failed" : string.Empty) + ".";
 
-                        // Refresh DLQ page for non-session; avoid SDK refresh when sessionEnabled
-                        if (sessionEnabled != true)
-                        {
-                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
-                            var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
-                            messages.Clear();
-                            messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
-                        }
+                        // Always refresh the DLQ page after delete (session and non-session)
+                        (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
+                        var req = GetMessagePageRequestRows(view, selectedNs, selectedEntity);
+                        messages.Clear();
+                        messages.AddRange(await FetchMessagesPageAsync(receiver!, nextFromSequence, req, ct));
                     }
                     catch (Exception ex) when (IsUnauthorized(ex))
                     {
