@@ -180,3 +180,32 @@ Next Steps (implementation)
   - Breadcrumbs or quick jump keys; improve PageUp fallback logic (compute previous pages even without history) and test.
 - Tests
   - Width logic tests for Namespaces/Entities/Messages; PageUp fallback; ESC stack behavior.
+
+## Known Issues (2025-10-15)
+
+- AMQP with AAD (CBS/JWT) for session DLQ completion/delete intermittently fails or times out in a real namespace.
+  - Latest observed logs:
+    - Resubmit start targets=118 entity=intreceiver-submit mode=DeadLetter sessionEnabled=True
+    - AMQP(AAD) DLQ completion attempt host=sh-dev-bus.servicebus.windows.net queue=intreceiver-submit session=15970 seq=118
+    - After ~11s: AMQP DLQ completion result=False; UI shows “Resubmitted 0 message(s), 1 DLQ completions failed.”
+  - Current implementation snapshot:
+    - AMQP connection via SASL-ANONYMOUS using AmqpNetLite; CBS put-token to `$cbs` with AAD token (scope `https://servicebus.azure.net/.default`).
+    - Audience: `amqp://{host}/{queue}/$DeadLetterQueue`.
+    - Token types attempted: `servicebus.windows.net:jwt`, then `jwt` (short wait each).
+    - Waits for CBS `status-code == 200` and correlation-id matching the put-token message-id; includes `expiration`.
+    - On success, opens receiver to `{queue}/$DeadLetterQueue`, browses to the target by SessionId/SequenceNumber, and Accepts it.
+    - SAS fallback remains available if provided.
+  - Recently fixed:
+    - Added credit on CBS receiver (`SetCredit(5)`), preventing hangs due to no credit.
+    - Normalized host in logs; correlation-id check; dual token-type attempt.
+  - Hypotheses to test next:
+    1) Audience format: try `sb://{host}/{entity}` and root `amqp://{host}/` if entity audience fails.
+    2) CBS diagnostics: log `status-description` and non-200 codes; confirm correlation-id echoes request id.
+    3) Token claims/scope: verify identity has sufficient data-plane rights; consider token refresh immediately before CBS.
+    4) DLQ browse/settle: validate Accept semantics on DLQ under AAD; adjust to explicit disposition if required.
+    5) Timeouts/credit: extend CBS wait slightly; ensure adequate DLQ receiver credit.
+  - Proposed next steps:
+    - Add verbose CBS diagnostics (audience, token type, status-code/description, correlation-id, elapsed, timeout vs. failure).
+    - Implement audience fallback order and a CLI flag to force a specific audience for debugging.
+    - Add a limited CBS retry before declaring failure.
+    - Keep SAS fallback behind a flag for reliability while iterating.
