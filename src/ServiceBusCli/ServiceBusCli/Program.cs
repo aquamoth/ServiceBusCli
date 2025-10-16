@@ -17,14 +17,13 @@ public class Program
         var topicSubOption = new Option<string?>("--topic-subscription", description: "Topic subscription name");
         var authOption = new Option<string>("--auth", () => "auto", "Auth mode: auto|device|browser|cli|vscode");
         var tenantOption = new Option<string?>("--tenant", description: "Entra tenant id");
-        var connStrOption = new Option<string?>("--connection-string", description: "Service Bus connection string (SAS) for AMQP features");
         var themeOption = new Option<string>("--theme", () => "default", "Theme: default|mono|no-color|solarized");
         var amqpVerboseOption = new Option<bool>("--amqp-verbose", description: "Verbose AMQP CBS diagnostics (AAD/JWT path)");
         var noColor = new Option<bool>("--no-color", description: "Disable color output");
 
         var root = new RootCommand("Azure Service Bus CLI (preview)")
         {
-            nsOption, azureSubOption, queueOption, topicOption, topicSubOption, authOption, tenantOption, themeOption, noColor, connStrOption, amqpVerboseOption
+            nsOption, azureSubOption, queueOption, topicOption, topicSubOption, authOption, tenantOption, themeOption, noColor, amqpVerboseOption
         };
 
         root.SetHandler(async (InvocationContext ctx) =>
@@ -39,7 +38,6 @@ public class Program
             var tenant = parse.GetValueForOption(tenantOption);
             var theme = parse.GetValueForOption(themeOption);
             var disableColor = parse.GetValueForOption(noColor);
-            var amqpConnStr = parse.GetValueForOption(connStrOption);
             var amqpVerbose = parse.GetValueForOption(amqpVerboseOption);
 
             var config = new ConfigurationBuilder()
@@ -58,29 +56,7 @@ public class Program
             Console.WriteLine("Logging via Serilog (see appsettings.json). File sink defaults to %USERPROFILE%/.servicebuscli/logs/app-.log");
             var cred = CredentialFactory.Create(auth!, tenant);
             var discovery = new ArmServiceBusDiscovery(cred);
-            string? amqpLine = null;
-            try
-            {
-                var cs = string.IsNullOrWhiteSpace(amqpConnStr)
-                    ? Environment.GetEnvironmentVariable("SERVICEBUS_CONNECTION_STRING")
-                    : amqpConnStr;
-                if (!string.IsNullOrWhiteSpace(cs))
-                {
-                    var (ok, msg, host, policy) = await ServiceBusCli.Amqp.AmqpVerifier.TryVerifySasConnectionAsync(cs, 3000, ctx.GetCancellationToken());
-                    amqpLine = ok ? $"AMQP: ready ({host} as {policy})" : $"AMQP: {msg}";
-                }
-                else
-                {
-                    amqpLine = null; // keep output clean if not set
-                }
-            }
-            catch (Exception ex)
-            {
-                amqpLine = $"AMQP: check failed: {ex.Message}";
-            }
-            if (!string.IsNullOrWhiteSpace(amqpLine)) Console.WriteLine(amqpLine);
-            if (!string.IsNullOrWhiteSpace(amqpLine)) Logger.Info(amqpLine);
-            var app = new BrowserApp(cred, discovery, themeResolved, azSub, ns, q, t, tSub, null, amqpConnStr)
+            var app = new BrowserApp(cred, discovery, themeResolved, azSub, ns, q, t, tSub, null)
             {
                 AmqpVerbose = amqpVerbose
             };

@@ -59,7 +59,6 @@ CLI options (current):
 - `--topic <name>` and `--topic-subscription <name>`: Preselect topic subscription
 - `--auth <auto|device|browser|cli|vscode>`: Auth mode (default: auto)
 - `--tenant <guid>`: Entra tenant ID
-- `--connection-string <SAS>`: Optional; SAS fallback for AMQP operations (AAD is preferred and sufficient)
 - `--theme <name>`: Theme preset (`default`, `mono`, `no-color`, `solarized`)
 - `--no-color`: Disable color output
 
@@ -105,7 +104,7 @@ External editor resolution: `$VISUAL` → `$EDITOR` → OS default (`xdg-open` o
 ### Environment
 
 - `AZURE_TENANT_ID`: Entra tenant ID
-- `SERVICEBUS_CONNECTION_STRING`: Optional SAS fallback for AMQP features (not required with AAD)
+// SAS connection strings are not used; AAD is required and sufficient.
 
 ## Status
 

@@ -20,12 +20,11 @@ public sealed partial class BrowserApp
     private readonly string? _topicArg;
     private readonly string? _tSubArg;
 
-    private readonly string? _amqpConnectionString;
     private string? _sessionFilter; // when set, only show messages with this SessionId
     public bool AmqpVerbose { get; set; }
 
     public BrowserApp(TokenCredential credential, IServiceBusDiscovery discovery, Theme theme,
-        string? azureSubscriptionId = null, string? nsArg = null, string? queueArg = null, string? topicArg = null, string? topicSubscriptionArg = null, string? startupStatus = null, string? amqpConnectionString = null)
+        string? azureSubscriptionId = null, string? nsArg = null, string? queueArg = null, string? topicArg = null, string? topicSubscriptionArg = null, string? startupStatus = null)
     {
         _credential = credential;
         _discovery = discovery;
@@ -35,9 +34,6 @@ public sealed partial class BrowserApp
         _queueArg = queueArg;
         _topicArg = topicArg;
         _tSubArg = topicSubscriptionArg;
-        _amqpConnectionString = string.IsNullOrWhiteSpace(amqpConnectionString)
-            ? Environment.GetEnvironmentVariable("SERVICEBUS_CONNECTION_STRING")
-            : amqpConnectionString;
     }
 
     private enum View { Namespaces, Entities, Messages }
@@ -619,11 +615,7 @@ public sealed partial class BrowserApp
                                         AmqpVerbose,
                                         msg => Logger.Info(msg),
                                         err => Logger.Error(err));
-                                    if (!ok && !string.IsNullOrWhiteSpace(_amqpConnectionString))
-                                    {
-                                        Logger.Info("AAD completion failed; trying SAS fallback");
-                                        ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, Math.Max(1, takeWithinSession), _amqpConnectionString, ct);
-                                    }
+                                    // AAD-only: no SAS fallback
                                     Logger.Info("AMQP DLQ completion result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
                                     if (ok) success++; else fail++;
                                 }
@@ -732,11 +724,7 @@ public sealed partial class BrowserApp
                                         AmqpVerbose,
                                         msg => Logger.Info(msg),
                                         err => Logger.Error(err));
-                                    if (!ok && !string.IsNullOrWhiteSpace(_amqpConnectionString))
-                                    {
-                                        Logger.Info("AAD delete failed; trying SAS fallback");
-                                        ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, Math.Max(1, takeWithinSession), _amqpConnectionString, ct);
-                                    }
+                                    // AAD-only: no SAS fallback
                                     Logger.Info("AMQP DLQ delete result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
                                     if (ok) success++; else fail++;
                                 }
