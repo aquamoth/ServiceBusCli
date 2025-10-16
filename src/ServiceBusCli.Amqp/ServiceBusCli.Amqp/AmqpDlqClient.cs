@@ -38,8 +38,10 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
         var addr = new global::Amqp.Address(host, 5671, keyName, key);
         // AMQP connect attempt (no-op log)
 
-        // Allow a bit more time: network + filtered receive
-        var deadline = DateTime.UtcNow.AddSeconds(30);
+        // Bounded window: keep UI responsive
+        var baseSeconds = 8;
+        var extra = Math.Min(12, Math.Max(0, (maxReceive / 50)));
+        var deadline = DateTime.UtcNow.AddSeconds(baseSeconds + extra);
         var conn = await ConnectWithRetryAsync(addr, deadline, ct).ConfigureAwait(false);
         var session = new global::Amqp.Session(conn);
         // Session opened
@@ -53,10 +55,11 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
         {
             receiver = new global::Amqp.ReceiverLink(session, $"dlq-browse-{Guid.NewGuid():N}", attach, null);
             // Generous credit to reduce round-trips; DLQ without session filtering can require high credit.
-            var credit = Math.Min(2000, Math.Max(200, maxReceive * 20));
+            var credit = Math.Min(1000, Math.Max(100, maxReceive * 10));
             receiver.SetCredit(credit, false);
 
             global::Amqp.Message? targetMsg = null;
+            int scanned = 0;
             while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
             {
                 var remain = deadline - DateTime.UtcNow;
@@ -67,6 +70,7 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
                     if (DateTime.UtcNow >= deadline) break;
                     continue;
                 }
+                scanned++;
 
                 var sid = TryGetSessionId(msg);
                 var seq = TryGetSequenceNumber(msg);
@@ -88,6 +92,7 @@ public sealed class AmqpDlqClient : IAmqpDlqClient
                 receiver.Accept(targetMsg);
                 return true;
             }
+            // Miss
             return false;
         }
         catch
@@ -261,30 +266,16 @@ public static class AmqpDlqClientAadExtensions
             if (amqpVerbose && !string.IsNullOrEmpty(sessionId)) log?.Invoke("DLQ sub-queue does not support session links; browsing without filter");
             var attach = new Attach { Source = source, Target = new Target() };
             receiver = new ReceiverLink(session, $"dlq-browse-{Guid.NewGuid():N}", attach, null);
-            var credit = Math.Min(2000, Math.Max(200, maxReceive * 20));
-            receiver.SetCredit(credit, false);
-
-            var browseDeadline = DateTime.UtcNow.AddSeconds(30);
-            while (DateTime.UtcNow < browseDeadline && !ct.IsCancellationRequested)
-            {
-                var remain = browseDeadline - DateTime.UtcNow;
-                var wait = remain > TimeSpan.FromMilliseconds(500) ? TimeSpan.FromMilliseconds(500) : remain;
-                var msg = await receiver.ReceiveAsync(wait).ConfigureAwait(false);
-                if (msg == null) continue;
-                var sid = TryGetSessionId(msg);
-                var seq = TryGetSequenceNumber(msg);
-                if (!string.IsNullOrEmpty(sessionId) && !string.Equals(sid, sessionId, StringComparison.Ordinal))
-                {
-                    receiver.Release(msg);
-                    continue;
-                }
-                if (seq.HasValue && seq.Value == sequenceNumber)
-                {
-                    receiver.Accept(msg);
-                    return true;
-                }
-                receiver.Release(msg);
-            }
+            // First pass
+            if (await BrowseAndAcceptAsync(receiver, sessionId, sequenceNumber, maxReceive, amqpVerbose, log, logError, ct).ConfigureAwait(false))
+                return true;
+            // Second pass with higher credit and longer window
+            try { receiver.Close(); } catch { }
+            receiver = new ReceiverLink(session, $"dlq-browse2-{Guid.NewGuid():N}", attach, null);
+            if (amqpVerbose) log?.Invoke("DLQ browse second pass with higher credit/window");
+            if (await BrowseAndAcceptAsync(receiver, sessionId, sequenceNumber, Math.Max(maxReceive * 5, 200), amqpVerbose, log, logError, ct, extraSeconds: 20, creditCap: 2000).ConfigureAwait(false))
+                return true;
+            if (amqpVerbose) logError?.Invoke("DLQ browse timeout without match");
             return false;
         }
         catch (Exception ex)
@@ -359,6 +350,37 @@ public static class AmqpDlqClientAadExtensions
             finally { }
         }
         if (verbose) logError?.Invoke($"CBS put-token timeout type={tokenType} audience={audience} elapsed={(DateTime.UtcNow - start).TotalMilliseconds} ms");
+        return false;
+    }
+
+    private static async Task<bool> BrowseAndAcceptAsync(ReceiverLink receiver, string sessionId, long sequenceNumber, int maxReceive, bool verbose, Action<string>? log, Action<string>? logError, CancellationToken ct, int extraSeconds = 0, int creditCap = 1000)
+    {
+        var credit = Math.Min(creditCap, Math.Max(100, maxReceive * 10));
+        receiver.SetCredit(credit, false);
+        var baseSeconds = 8 + Math.Max(0, extraSeconds);
+        var extra = Math.Min(12, Math.Max(0, (maxReceive / 50)));
+        var browseDeadline = DateTime.UtcNow.AddSeconds(baseSeconds + extra);
+        if (verbose) log?.Invoke($"DLQ browse start credit={credit} windowSec={baseSeconds + extra}");
+        while (DateTime.UtcNow < browseDeadline && !ct.IsCancellationRequested)
+        {
+            var remain = browseDeadline - DateTime.UtcNow;
+            var wait = remain > TimeSpan.FromMilliseconds(500) ? TimeSpan.FromMilliseconds(500) : remain;
+            var msg = await receiver.ReceiveAsync(wait).ConfigureAwait(false);
+            if (msg == null) continue;
+            var sid = TryGetSessionId(msg);
+            var seq = TryGetSequenceNumber(msg);
+            if (!string.IsNullOrEmpty(sessionId) && !string.Equals(sid, sessionId, StringComparison.Ordinal))
+            {
+                receiver.Release(msg);
+                continue;
+            }
+            if (seq.HasValue && seq.Value == sequenceNumber)
+            {
+                receiver.Accept(msg);
+                return true;
+            }
+            receiver.Release(msg);
+        }
         return false;
     }
 }

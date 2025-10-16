@@ -704,34 +704,46 @@ public sealed partial class BrowserApp
                         int success = 0, fail = 0;
                         if (sessionEnabled == true)
                         {
-                            var amqp = new AmqpDlqClient();
+                            // Try SDK DLQ receiver first (DLQ sub-queues do not require session receivers)
+                            (messageClient, receiver) = await EnsureReceiverAsync(selectedNs!, selectedEntity!, MessageMode.DeadLetter, messageClient, receiver, ct);
                             foreach (var seq in targets)
                             {
-                                var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
-                                if (targetRow is null || string.IsNullOrEmpty(targetRow.SessionId)) { fail++; continue; }
-                                int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.OrdinalIgnoreCase))
-                                    .TakeWhile(m => m.SequenceNumber <= seq).Count();
-                                var normHost = AmqpDlqClient.NormalizeHost(selectedNs!.FullyQualifiedNamespace);
-                                Logger.Info($"AMQP(AAD) DLQ delete attempt host={normHost} queue={qe.QueueName} session={targetRow.SessionId} seq={seq}");
-                                var a0 = DateTime.UtcNow;
-                                bool ok = await amqp.CompleteDlqSessionMessageWithAadAsync(
-                                    _credential,
-                                    selectedNs!.FullyQualifiedNamespace,
-                                    qe.QueueName,
-                                    targetRow.SessionId!,
-                                    seq,
-                                    Math.Max(1, takeWithinSession),
-                                    ct,
-                                    AmqpVerbose,
-                                    msg => Logger.Info(msg),
-                                    err => Logger.Error(err));
-                                if (!ok && !string.IsNullOrWhiteSpace(_amqpConnectionString))
+                                int take = messages.TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                var deleted = await TryDeleteDlqMessageFromPageAsync(receiver!, seq, Math.Max(1, take), ct);
+                                if (!deleted)
                                 {
-                                    Logger.Info("AAD delete failed; trying SAS fallback");
-                                    ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, Math.Max(1, takeWithinSession), _amqpConnectionString, ct);
+                                    // Fallback to AMQP AAD browse/accept
+                                    var targetRow = messages.FirstOrDefault(mm => mm.SequenceNumber == seq);
+                                    if (targetRow is null || string.IsNullOrEmpty(targetRow.SessionId)) { fail++; continue; }
+                                    int takeWithinSession = messages.Where(m => string.Equals(m.SessionId, targetRow.SessionId, StringComparison.OrdinalIgnoreCase))
+                                        .TakeWhile(m => m.SequenceNumber <= seq).Count();
+                                    var normHost = AmqpDlqClient.NormalizeHost(selectedNs!.FullyQualifiedNamespace);
+                                    Logger.Info($"AMQP(AAD) DLQ delete attempt host={normHost} queue={qe.QueueName} session={targetRow.SessionId} seq={seq}");
+                                    var a0 = DateTime.UtcNow;
+                                    var amqp = new AmqpDlqClient();
+                                    bool ok = await amqp.CompleteDlqSessionMessageWithAadAsync(
+                                        _credential,
+                                        selectedNs!.FullyQualifiedNamespace,
+                                        qe.QueueName,
+                                        targetRow.SessionId!,
+                                        seq,
+                                        Math.Max(1, takeWithinSession),
+                                        ct,
+                                        AmqpVerbose,
+                                        msg => Logger.Info(msg),
+                                        err => Logger.Error(err));
+                                    if (!ok && !string.IsNullOrWhiteSpace(_amqpConnectionString))
+                                    {
+                                        Logger.Info("AAD delete failed; trying SAS fallback");
+                                        ok = await amqp.CompleteDlqSessionMessageAsync(selectedNs!.FullyQualifiedNamespace, qe.QueueName, targetRow.SessionId!, seq, Math.Max(1, takeWithinSession), _amqpConnectionString, ct);
+                                    }
+                                    Logger.Info("AMQP DLQ delete result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
+                                    if (ok) success++; else fail++;
                                 }
-                                Logger.Info("AMQP DLQ delete result=" + ok + " elapsed=" + (DateTime.UtcNow - a0).TotalMilliseconds + " ms");
-                                if (ok) success++; else fail++;
+                                else
+                                {
+                                    success++;
+                                }
                             }
                         }
                         else
